@@ -53,6 +53,7 @@ STATE: dict = {
     "ha_entries": [],   # tuya_local config entries
     "last_scan": None,
     "last_sync": None,
+    "version": "",      # add-on version, from Supervisor at startup
 }
 
 
@@ -394,6 +395,7 @@ async def get_state():
         "mismatches": _build_mismatches() if STATE["ha_entries"] else [],
         "last_scan": STATE["last_scan"],
         "last_sync": STATE["last_sync"],
+        "version": STATE["version"],
         "creds_configured": bool(API_KEY and API_SECRET and API_DEVICE_ID),
     }
 
@@ -458,6 +460,16 @@ async def index():
 @app.on_event("startup")
 async def _startup():
     _load_cached_files()
+    # our own version, for display in the UI
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "http://supervisor/addons/self/info",
+                headers={"Authorization": f"Bearer {SUPERVISOR_TOKEN}"},
+            )
+            STATE["version"] = (r.json().get("data") or {}).get("version", "")
+    except Exception:
+        pass
     # best-effort HA read on boot so the UI has data immediately
     try:
         STATE["ha_entries"] = await _ha_get_tuya_entries()

@@ -54,7 +54,8 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   t.classList.add('active'); view=t.dataset.view; sortKey=null; catFilter='all'; render();
 });
-el('search').oninput = render;
+el('search').oninput = ()=>{ el('searchClear').classList.toggle('hidden',!el('search').value); render(); };
+el('searchClear').onclick = ()=>{ el('search').value=''; el('searchClear').classList.add('hidden'); render(); el('search').focus(); };
 el('revealBtn').onclick = ()=>{ const on=document.body.classList.toggle('reveal');
   el('revealBtn').classList.toggle('armed',on); el('revealLabel').textContent=on?'Hide keys':'Reveal keys'; };
 
@@ -86,7 +87,8 @@ function renderHead(){
   const h=el('thead');
   if(view==='mismatches'){ h.className='thead grid-mm';
     h.innerHTML=`<div class="th" data-s="title">Device</div><div class="th" data-s="host">HA Host</div>
-      <div class="th" data-s="scan">Scanned</div><div>State</div><div style="text-align:right">Action</div>`;
+      <div class="th" data-s="scan">Scanned</div><div class="th" data-s="state">State</div>
+      <div class="th" data-s="action" style="justify-content:flex-end">Action</div>`;
   }else{ h.className='thead grid-dev';
     h.innerHTML=`<div class="th" data-s="name">Device</div><div class="th" data-s="ip">IP</div>
       <div class="th" data-s="key">Local key</div><div class="th" data-s="ver" style="justify-content:flex-end">Ver</div>`;
@@ -99,6 +101,7 @@ function renderHead(){
 
 function render(){
   el('titleCount').textContent = STATE.ha_entries.length? `// ${STATE.ha_entries.length} devices`:'';
+  el('appVersion').textContent = STATE.version? `· v${STATE.version}`:'';
   el('timestamps').textContent = `sync ${fmtTime(STATE.last_sync)} · scan ${fmtTime(STATE.last_scan)}`;
   renderStats(); renderHead();
   const q=el('search').value.trim().toLowerCase();
@@ -112,6 +115,8 @@ function render(){
     if(sortKey)list.sort((a,b)=>{ let av,bv;
       if(sortKey==='host'){av=ipNum(a.configured_host);bv=ipNum(b.configured_host);return (av-bv)*sortDir;}
       if(sortKey==='scan'){av=ipNum(a.scanned_ip);bv=ipNum(b.scanned_ip);return (av-bv)*sortDir;}
+      if(sortKey==='state'){av=a.state||'';bv=b.state||'';return av<bv?-sortDir:av>bv?sortDir:0;}
+      if(sortKey==='action'){const rank=m=>m.mismatch?0:(m.found_on_lan?1:2);return (rank(a)-rank(b))*sortDir;}
       av=(a.title||'').toLowerCase();bv=(b.title||'').toLowerCase();return av<bv?-sortDir:av>bv?sortDir:0; });
     else list.sort((a,b)=>(b.mismatch-a.mismatch)|| a.title.localeCompare(b.title));
     list.forEach(m=>{

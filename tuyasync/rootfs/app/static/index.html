@@ -91,9 +91,12 @@
   .toolbar{display:flex;gap:12px;align-items:center;margin:0 0 14px}
   .search{flex:1 1 240px;position:relative}
   .search input{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:11px;
-    padding:11px 14px 11px 38px;color:var(--ink);font-size:14px;outline:none}
+    padding:11px 36px 11px 38px;color:var(--ink);font-size:14px;outline:none}
   .search input:focus{border-color:var(--amber)}
   .search svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.5}
+  .search .clear{position:absolute;right:10px;top:50%;transform:translateY(-50%);cursor:pointer;
+    color:var(--ink-faint);font-size:12px;padding:4px 6px;border-radius:6px;user-select:none}
+  .search .clear:hover{color:var(--ink);background:var(--panel-2)}
   .toggle{display:inline-flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);
     border-radius:11px;padding:10px 15px;cursor:pointer;font-size:13px;color:var(--ink-dim);user-select:none}
   .toggle.armed{color:var(--amber);border-color:var(--amber);background:var(--amber-soft)}
@@ -116,7 +119,7 @@
 </head>
 <body>
 <div class="wrap">
-  <div class="eyebrow">Tuya Local · Home Assistant Add-on</div>
+  <div class="eyebrow">Tuya Local · Home Assistant Add-on <span id="appVersion"></span></div>
   <h1>TuyaSync <span class="dim" id="titleCount"></span></h1>
   <p class="sub">Pull keys from the Tuya cloud, scan your LAN for live IPs, and repair stale device IPs in Home Assistant — one approval per device.</p>
 
@@ -139,6 +142,7 @@
     <div class="search">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       <input id="search" type="text" placeholder="Filter…" autocomplete="off">
+      <span class="clear hidden" id="searchClear" title="Clear filter">✕</span>
     </div>
     <div class="toggle" id="revealBtn"><span class="dot"></span><span id="revealLabel">Reveal keys</span></div>
   </div>
