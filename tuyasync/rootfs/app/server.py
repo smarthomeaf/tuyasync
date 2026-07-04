@@ -452,6 +452,16 @@ async def fix_host(req: FixRequest):
 app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 
 
+@app.middleware("http")
+async def _no_cache_ui(request, call_next):
+    """The UI is a few KB; forbid caching so updates show up on plain reload
+    (browsers cache aggressively inside the ingress iframe)."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/")
 async def index():
     return FileResponse("/app/static/index.html")
