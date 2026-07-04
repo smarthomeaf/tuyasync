@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TuyaSync</title>
+<style>
+  :root{
+    --bg:#0e1420;--panel:#151d2e;--panel-2:#1b2740;--line:#26334f;--ink:#e8eef8;
+    --ink-dim:#8798b5;--ink-faint:#566a8a;--amber:#f2a93b;--amber-soft:#f2a93b22;
+    --cyan:#3fd6c8;--cyan-soft:#3fd6c822;--red:#ec6a6a;--red-soft:#ec6a6a22;--green:#5fd88a;
+    --mono:"SF Mono","JetBrains Mono",ui-monospace,Menlo,monospace;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:radial-gradient(1200px 600px at 85% -10%,#1a2740 0,transparent 60%),
+    radial-gradient(900px 500px at 0% 110%,#16283a 0,transparent 55%),var(--bg);
+    color:var(--ink);font-family:var(--sans);min-height:100vh;padding:clamp(18px,3vw,40px);line-height:1.4}
+  .wrap{max-width:1240px;margin:0 auto}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;color:var(--amber);margin-bottom:10px}
+  h1{font-size:clamp(26px,4vw,42px);font-weight:800;letter-spacing:-.02em}
+  h1 .dim{color:var(--ink-dim);font-weight:300}
+  .sub{margin-top:10px;color:var(--ink-dim);font-size:14px;max-width:64ch}
+
+  .actions{display:flex;flex-wrap:wrap;gap:12px;margin:24px 0}
+  .btn{display:inline-flex;align-items:center;gap:9px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:13px 20px;cursor:pointer;font-size:14px;font-weight:600;color:var(--ink);
+    font-family:var(--sans);transition:all .15s}
+  .btn:hover:not(:disabled){border-color:var(--amber);transform:translateY(-1px)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.primary{background:linear-gradient(135deg,#2a3a5c,#22314f);border-color:var(--amber)}
+  .btn .spin{width:14px;height:14px;border:2px solid var(--ink-faint);border-top-color:var(--amber);
+    border-radius:50%;animation:sp .7s linear infinite;display:none}
+  .btn.loading .spin{display:inline-block}
+  .btn.loading .lbl{opacity:.6}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin:8px 0 22px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:11px 18px;
+    display:flex;align-items:baseline;gap:9px;cursor:pointer;user-select:none;transition:all .14s}
+  .stat:hover{border-color:var(--ink-dim)}
+  .stat.active{border-color:var(--amber);background:var(--amber-soft)}
+  .stat .n{font-family:var(--mono);font-size:20px;font-weight:700}
+  .stat .l{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-dim)}
+  .stat.mm .n{color:var(--red)} .stat.mm.active{border-color:var(--red);background:var(--red-soft)}
+  .stat.on .n{color:var(--cyan)}
+
+  .tabs{display:flex;gap:4px;margin-bottom:16px;border-bottom:1px solid var(--line)}
+  .tab{padding:11px 18px;cursor:pointer;font-size:13px;font-weight:600;color:var(--ink-dim);
+    border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .14s}
+  .tab:hover{color:var(--ink)} .tab.active{color:var(--amber);border-bottom-color:var(--amber)}
+
+  .table{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+  .thead,.row{display:grid;gap:14px;align-items:center;padding:13px 20px}
+  .thead{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--ink-dim);border-bottom:1px solid var(--line);background:var(--panel-2)}
+  .th{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .th:hover{color:var(--ink)} .th.active{color:var(--amber)}
+  .row{border-bottom:1px solid var(--line);transition:background .12s}
+  .row:last-child{border-bottom:none} .row:hover{background:var(--panel-2)}
+  .grid-dev{grid-template-columns:1.5fr 1fr 1.9fr .5fr}
+  .grid-mm{grid-template-columns:1.4fr 1fr 1fr .5fr .9fr}
+
+  .name{font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px}
+  .badge{font-family:var(--mono);font-size:9px;letter-spacing:.1em;padding:2px 6px;border-radius:5px;
+    text-transform:uppercase;font-weight:700}
+  .badge.lan{background:var(--cyan-soft);color:var(--cyan)} .badge.sub{background:#9b8cff22;color:#b3a6ff}
+  .badge.retry{background:var(--amber-soft);color:var(--amber)}
+  .badge.loaded{background:#5fd88a22;color:var(--green)}
+  .id{display:block;font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-top:2px}
+  .copyable{font-family:var(--mono);font-size:13px;cursor:pointer;padding:5px 9px;border-radius:7px;
+    border:1px solid transparent;transition:all .12s;display:inline-flex;align-items:center;gap:7px;max-width:100%}
+  .copyable:hover{background:var(--panel-2);border-color:var(--line)}
+  .copyable.copied{border-color:var(--cyan);color:var(--cyan)}
+  .txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .empty{color:var(--amber);font-size:12px}
+  .key .txt{color:var(--ink-dim);letter-spacing:1px}
+  body:not(.reveal) .key .txt{filter:blur(5px)} body:not(.reveal) .key:hover .txt{filter:blur(0)}
+  .ver{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+
+  .arrow-change{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:13px}
+  .arrow-change .old{color:var(--ink-faint);text-decoration:line-through}
+  .arrow-change .new{color:var(--green);font-weight:700}
+  .fixbtn{background:var(--green);color:#06231f;border:none;border-radius:8px;padding:7px 14px;
+    font-weight:700;font-size:12px;cursor:pointer;font-family:var(--sans);transition:all .14s}
+  .fixbtn:hover{filter:brightness(1.1)} .fixbtn:disabled{opacity:.5;cursor:default}
+  .fixbtn.done{background:transparent;color:var(--green);border:1px solid var(--green)}
+  .ok{color:var(--green);font-family:var(--mono);font-size:12px}
+  .nochange{color:var(--ink-faint);font-size:12px}
+
+  .toolbar{display:flex;gap:12px;align-items:center;margin:0 0 14px}
+  .search{flex:1 1 240px;position:relative}
+  .search input{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:11px;
+    padding:11px 14px 11px 38px;color:var(--ink);font-size:14px;outline:none}
+  .search input:focus{border-color:var(--amber)}
+  .search svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.5}
+  .toggle{display:inline-flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);
+    border-radius:11px;padding:10px 15px;cursor:pointer;font-size:13px;color:var(--ink-dim);user-select:none}
+  .toggle.armed{color:var(--amber);border-color:var(--amber);background:var(--amber-soft)}
+  .toggle .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-dim)}
+  .toggle.armed .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+
+  .banner{padding:12px 18px;border-radius:12px;margin-bottom:16px;font-size:13px;display:none}
+  .banner.show{display:block}
+  .banner.err{background:var(--red-soft);border:1px solid var(--red);color:var(--red)}
+  .banner.warn{background:var(--amber-soft);border:1px solid var(--amber);color:var(--amber)}
+  footer{margin-top:20px;font-size:12px;color:var(--ink-faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .warn-txt{color:var(--amber)}
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--cyan);
+    color:#06231f;font-weight:700;font-size:13px;padding:11px 20px;border-radius:10px;opacity:0;
+    pointer-events:none;transition:all .2s;font-family:var(--mono)}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .hidden{display:none!important}
+  @media(max-width:760px){.thead{display:none}.grid-dev,.grid-mm{grid-template-columns:1fr;gap:7px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Tuya Local · Home Assistant Add-on</div>
+  <h1>TuyaSync <span class="dim" id="titleCount"></span></h1>
+  <p class="sub">Pull keys from the Tuya cloud, scan your LAN for live IPs, and repair stale device IPs in Home Assistant — one approval per device.</p>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="actions">
+    <button class="btn primary" id="syncBtn"><span class="spin"></span><span class="lbl">☁ Sync from Cloud</span></button>
+    <button class="btn" id="scanBtn"><span class="spin"></span><span class="lbl">⟲ Scan LAN</span></button>
+    <button class="btn" id="haBtn"><span class="spin"></span><span class="lbl">⌂ Refresh HA</span></button>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="tabs">
+    <div class="tab active" data-view="mismatches">IP Mismatches</div>
+    <div class="tab" data-view="devices">All Devices</div>
+  </div>
+
+  <div class="toolbar">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input id="search" type="text" placeholder="Filter…" autocomplete="off">
+    </div>
+    <div class="toggle" id="revealBtn"><span class="dot"></span><span id="revealLabel">Reveal keys</span></div>
+  </div>
+
+  <div class="table">
+    <div class="thead" id="thead"></div>
+    <div id="rows"></div>
+  </div>
+
+  <footer>
+    <span><span class="warn-txt">⚠</span> Local keys are LAN control credentials — this panel is behind HA auth.</span>
+    <span id="timestamps"></span>
+  </footer>
+</div>
+<div class="toast" id="toast">Copied</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
