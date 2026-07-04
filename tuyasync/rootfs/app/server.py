@@ -271,34 +271,68 @@ async def _ha_update_host(entry_id: str, new_host: str,
 
 async def _ha_update_host_rest(entry_id: str, new_host: str, local_key: str,
                                protocol_version: str, poll_only: bool) -> None:
-    """REST implementation of the options-flow host update (preferred)."""
+    """
+    Update the entry's host via the options flow. The form schema varies by
+    device (hubs/sub-devices carry extra fields), so pre-fill every field
+    from the flow's own suggested/default values and only override `host`.
+    """
     # tuya_local stores protocol_version as a float (3.3) except "auto";
     # the options flow rejects the stringified form, so coerce it back.
     try:
         protocol_version = float(protocol_version)
     except (TypeError, ValueError):
         pass
+    fallbacks = {
+        "host": new_host,
+        "local_key": local_key,
+        "protocol_version": protocol_version,
+        "poll_only": poll_only,
+    }
     async with httpx.AsyncClient(timeout=30) as client:
-        # 1) init the options flow
+        # 1) init the options flow to get the form and its current values
         r = await client.post(
             "http://supervisor/core/api/config/config_entries/options/flow",
             headers=HA_HEADERS,
-            json={"handler": entry_id},
+            json={"handler": entry_id, "show_advanced_options": True},
         )
-        r.raise_for_status()
-        flow_id = r.json()["flow_id"]
+        if r.status_code >= 400:
+            raise RuntimeError(f"options flow init failed: {r.text[:300]}")
+        flow = r.json()
+        flow_id = flow["flow_id"]
+        user_input = {}
+        for field in flow.get("data_schema") or []:
+            name = field.get("name")
+            if not name:
+                continue
+            desc = field.get("description") or {}
+            if name == "host":
+                user_input[name] = new_host
+            elif "suggested_value" in desc:
+                user_input[name] = desc["suggested_value"]
+            elif "default" in field:
+                user_input[name] = field["default"]
+            elif name in fallbacks:
+                user_input[name] = fallbacks[name]
+            # optional fields with no current value stay unset
         # 2) submit the form
         r2 = await client.post(
             f"http://supervisor/core/api/config/config_entries/options/flow/{flow_id}",
             headers=HA_HEADERS,
-            json={
-                "local_key": local_key,
-                "host": new_host,
-                "protocol_version": protocol_version,
-                "poll_only": poll_only,
-            },
+            json=user_input,
         )
-        r2.raise_for_status()
+        if r2.status_code >= 400:
+            raise RuntimeError(
+                f"options flow rejected {sorted(user_input)}: {r2.text[:300]}"
+            )
+        result = r2.json()
+        if result.get("type") == "form":
+            errs = result.get("errors") or {}
+            if errs:
+                raise RuntimeError(f"options flow errors: {errs}")
+            raise RuntimeError(
+                f"options flow needs another step ({result.get('step_id')}) — "
+                "please finish this one in the HA UI"
+            )
 
 
 def _build_mismatches() -> list:
