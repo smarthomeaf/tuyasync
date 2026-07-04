@@ -121,8 +121,11 @@ def _cloud_sync_blocking() -> list:
 
 def _scan_blocking() -> list:
     """Broadcast-scan the LAN for reachable Tuya devices. Runs in a thread."""
-    # devicescan returns {ip: {...}} keyed by IP
-    found = tinytuya.devicescan(False, SCAN_RETRIES)
+    # tinytuya reads devices.json (names + local keys) from the CWD to enrich
+    # scan results, so run from WORKDIR where cloud sync writes it.
+    os.chdir(WORKDIR)
+    # deviceScan returns {ip: {...}} keyed by IP
+    found = tinytuya.deviceScan(False, SCAN_RETRIES)
     devices = list(found.values())
     snapshot = {"timestamp": time.time(), "devices": devices}
     SNAPSHOT_JSON.write_text(json.dumps(snapshot, indent=2))
