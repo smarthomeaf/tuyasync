@@ -60,7 +60,7 @@
   .row{border-bottom:1px solid var(--line);transition:background .12s}
   .row:last-child{border-bottom:none} .row:hover{background:var(--panel-2)}
   .grid-dev{grid-template-columns:1.5fr 1fr 1.9fr .5fr}
-  .grid-mm{grid-template-columns:1.4fr 1fr 1fr .5fr .9fr}
+  .grid-mm{grid-template-columns:1.3fr .85fr .85fr 1.5fr .55fr .8fr}
 
   .name{font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px}
   .badge{font-family:var(--mono);font-size:9px;letter-spacing:.1em;padding:2px 6px;border-radius:5px;
@@ -76,6 +76,8 @@
   .txt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .empty{color:var(--amber);font-size:12px}
   .key .txt{color:var(--ink-dim);letter-spacing:1px}
+  .keymm{display:flex;flex-direction:column;gap:2px}
+  .keymm .copyable{padding:2px 6px}
   body:not(.reveal) .key .txt{filter:blur(5px)} body:not(.reveal) .key:hover .txt{filter:blur(0)}
   .ver{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
 

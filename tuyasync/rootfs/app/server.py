@@ -337,10 +337,11 @@ async def _ha_update_host_rest(entry_id: str, new_host: str, local_key: str,
 
 
 def _build_mismatches() -> list:
-    """Diff scanned IP (by device id) against HA's configured host."""
+    """Diff scanned IP + configured local key (per device) against the cloud."""
     scan_by_id = {d["id"]: d for d in STATE["snapshot"] if d.get("id")}
     # entries carry their device_id (from HA storage); fall back to matching
     # the cloud list by title==name for entries that lack it.
+    cloud_by_id = {d["id"]: d for d in STATE["devices"] if d.get("id")}
     cloud_by_name = {d["name"]: d for d in STATE["devices"]}
     rows = []
     for e in STATE["ha_entries"]:
@@ -348,6 +349,9 @@ def _build_mismatches() -> list:
         dev_id = e.get("device_id") or (cloud["id"] if cloud else "")
         scanned = scan_by_id.get(dev_id)
         scanned_ip = scanned["ip"] if scanned else ""
+        # authoritative key from the cloud (only when we actually have it)
+        cloud_key = (cloud_by_id.get(dev_id) or cloud or {}).get("key", "")
+        ha_key = e["local_key"]
         rows.append({
             "entry_id": e["entry_id"],
             "title": e["title"],
@@ -355,10 +359,12 @@ def _build_mismatches() -> list:
             "configured_host": e["host"],
             "scanned_ip": scanned_ip,
             "device_id": dev_id,
-            "local_key": e["local_key"],
+            "local_key": ha_key,
+            "cloud_key": cloud_key,
             "protocol_version": e["protocol_version"],
             "poll_only": e["poll_only"],
             "mismatch": bool(scanned_ip and e["host"] and scanned_ip != e["host"]),
+            "key_mismatch": bool(cloud_key and ha_key and cloud_key != ha_key),
             "found_on_lan": bool(scanned_ip),
         })
     return rows
@@ -441,10 +447,11 @@ async def fix_host(req: FixRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Fix failed: {e}")
     # HA persists config entries with a delayed write, so re-reading storage
-    # now would still show the old host — update our cache optimistically.
+    # now would still show the old values — update our cache optimistically.
     for e in STATE["ha_entries"]:
         if e["entry_id"] == req.entry_id:
             e["host"] = req.new_host
+            e["local_key"] = req.local_key
     return {"ok": True, "entry_id": req.entry_id, "new_host": req.new_host}
 
 

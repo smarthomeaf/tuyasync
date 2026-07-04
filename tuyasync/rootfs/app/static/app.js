@@ -37,14 +37,18 @@ el('haBtn').onclick   = ()=>doAction(el('haBtn'),'/api/ha/refresh','HA refreshed
 
 async function fixOne(m, btn){
   btn.disabled=true; btn.textContent='Fixing…';
+  // correct only what's wrong: stale IP and/or stale local key
+  const newHost = m.mismatch ? m.scanned_ip : m.configured_host;
+  const newKey  = m.key_mismatch ? m.cloud_key : m.local_key;
   try{
     const r = await fetch(API('/api/fix'),{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({entry_id:m.entry_id,new_host:m.scanned_ip,local_key:m.local_key,
+      body:JSON.stringify({entry_id:m.entry_id,new_host:newHost,local_key:newKey,
         protocol_version:m.protocol_version,poll_only:m.poll_only})});
     const j = await r.json();
     if(!r.ok) throw new Error(j.detail||'fix failed');
     btn.textContent='✓ Fixed'; btn.classList.add('done');
-    showToast(`${m.title} → ${m.scanned_ip}`);
+    const bits=[]; if(m.mismatch)bits.push(`IP → ${m.scanned_ip}`); if(m.key_mismatch)bits.push('key updated');
+    showToast(`${m.title}: ${bits.join(' · ')||'saved'}`);
     await loadState();
   }catch(e){ banner(e.message,'err'); btn.disabled=false; btn.textContent='Fix'; }
 }
@@ -63,11 +67,13 @@ function renderStats(){
   const s=el('stats');
   if(view==='mismatches'){
     const mm=STATE.mismatches.filter(m=>m.mismatch).length;
+    const km=STATE.mismatches.filter(m=>m.key_mismatch).length;
     const onlan=STATE.mismatches.filter(m=>m.found_on_lan).length;
     const off=STATE.ha_entries.filter(e=>e.state==='setup_retry').length;
     s.innerHTML=`
       <div class="stat ${catFilter==='all'?'active':''}" data-f="all"><span class="n">${STATE.ha_entries.length}</span><span class="l">HA Devices</span></div>
       <div class="stat mm ${catFilter==='mismatch'?'active':''}" data-f="mismatch"><span class="n">${mm}</span><span class="l">IP Mismatch</span></div>
+      <div class="stat mm ${catFilter==='keymismatch'?'active':''}" data-f="keymismatch"><span class="n">${km}</span><span class="l">Key Mismatch</span></div>
       <div class="stat off ${catFilter==='offline'?'active':''}" data-f="offline"><span class="n">${off}</span><span class="l">Offline</span></div>
       <div class="stat on ${catFilter==='lan'?'active':''}" data-f="lan"><span class="n">${onlan}</span><span class="l">Seen on LAN</span></div>`;
   }else{
@@ -87,7 +93,8 @@ function renderHead(){
   const h=el('thead');
   if(view==='mismatches'){ h.className='thead grid-mm';
     h.innerHTML=`<div class="th" data-s="title">Device</div><div class="th" data-s="host">HA Host</div>
-      <div class="th" data-s="scan">Scanned</div><div class="th" data-s="state">State</div>
+      <div class="th" data-s="scan">Scanned</div><div class="th" data-s="key">Local key (HA)</div>
+      <div class="th" data-s="state">State</div>
       <div class="th" data-s="action" style="justify-content:flex-end">Action</div>`;
   }else{ h.className='thead grid-dev';
     h.innerHTML=`<div class="th" data-s="name">Device</div><div class="th" data-s="ip">IP</div>
@@ -111,30 +118,42 @@ function render(){
   if(view==='mismatches'){
     let list=STATE.mismatches.slice();
     if(catFilter==='mismatch')list=list.filter(m=>m.mismatch);
+    else if(catFilter==='keymismatch')list=list.filter(m=>m.key_mismatch);
     else if(catFilter==='offline')list=list.filter(m=>m.state==='setup_retry');
     else if(catFilter==='lan')list=list.filter(m=>m.found_on_lan);
     if(q)list=list.filter(m=>m.title.toLowerCase().includes(q)||(m.configured_host||'').includes(q));
     if(sortKey)list.sort((a,b)=>{ let av,bv;
       if(sortKey==='host'){av=ipNum(a.configured_host);bv=ipNum(b.configured_host);return (av-bv)*sortDir;}
       if(sortKey==='scan'){av=ipNum(a.scanned_ip);bv=ipNum(b.scanned_ip);return (av-bv)*sortDir;}
+      if(sortKey==='key'){return ((b.key_mismatch?1:0)-(a.key_mismatch?1:0))*sortDir;}
       if(sortKey==='state'){av=a.state||'';bv=b.state||'';return av<bv?-sortDir:av>bv?sortDir:0;}
-      if(sortKey==='action'){const rank=m=>m.mismatch?0:(m.found_on_lan?1:2);return (rank(a)-rank(b))*sortDir;}
+      if(sortKey==='action'){const rank=m=>(m.mismatch||m.key_mismatch)?0:(m.found_on_lan?1:2);return (rank(a)-rank(b))*sortDir;}
       av=(a.title||'').toLowerCase();bv=(b.title||'').toLowerCase();return av<bv?-sortDir:av>bv?sortDir:0; });
-    else list.sort((a,b)=>(b.mismatch-a.mismatch)|| a.title.localeCompare(b.title));
+    else list.sort((a,b)=>((b.mismatch||b.key_mismatch)-(a.mismatch||a.key_mismatch))|| a.title.localeCompare(b.title));
     list.forEach(m=>{
       const row=document.createElement('div'); row.className='row grid-mm';
       const stBadge=m.state==='setup_retry'?'<span class="badge retry">offline</span>':'<span class="badge loaded">loaded</span>';
       let action;
-      if(m.mismatch) action=`<button class="fixbtn">Fix</button>`;
+      if(m.mismatch||m.key_mismatch) action=`<button class="fixbtn">Fix</button>`;
       else if(!m.found_on_lan) action=`<span class="nochange">not on LAN</span>`;
       else action=`<span class="ok">✓ match</span>`;
       const scanCell = m.scanned_ip
         ? (m.mismatch?`<span class="new" style="font-family:var(--mono);color:var(--green);font-weight:700">${esc(m.scanned_ip)}</span>`
                      :`<span class="ver">${esc(m.scanned_ip)}</span>`)
         : `<span class="empty">—</span>`;
+      let keyCell;
+      if(!m.local_key){ keyCell=`<span class="empty">—</span>`; }
+      else if(m.key_mismatch){
+        keyCell=`<div class="keymm">`
+          +`<div class="copyable key" data-copy="${esc(m.local_key)}"><span class="txt" style="text-decoration:line-through;color:var(--red)">${esc(m.local_key)}</span></div>`
+          +`<div class="copyable key" data-copy="${esc(m.cloud_key)}"><span>→</span><span class="txt" style="color:var(--green);font-weight:700">${esc(m.cloud_key)}</span></div>`
+          +`</div>`;
+      } else {
+        keyCell=`<div class="copyable key" data-copy="${esc(m.local_key)}"><span>🔒</span><span class="txt">${esc(m.local_key)}</span></div>`;
+      }
       row.innerHTML=`<div class="name"><div><div>${esc(m.title)}</div><span class="id">${esc(m.device_id||'')}</span></div></div>
         <div class="copyable" data-copy="${esc(m.configured_host)}"><span class="txt ${m.mismatch?'old':''}" ${m.mismatch?'style=text-decoration:line-through;color:var(--ink-faint)':''}>${esc(m.configured_host||'—')}</span></div>
-        <div>${scanCell}</div><div>${stBadge}</div><div style="text-align:right">${action}</div>`;
+        <div>${scanCell}</div><div>${keyCell}</div><div>${stBadge}</div><div style="text-align:right">${action}</div>`;
       const fb=row.querySelector('.fixbtn'); if(fb) fb.onclick=()=>fixOne(m,fb);
       row.querySelectorAll('.copyable[data-copy]').forEach(n=>n.onclick=()=>copy(n.dataset.copy,n));
       rows.appendChild(row);
