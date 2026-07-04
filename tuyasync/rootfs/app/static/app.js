@@ -93,10 +93,12 @@ function renderHead(){
     h.innerHTML=`<div class="th" data-s="name">Device</div><div class="th" data-s="ip">IP</div>
       <div class="th" data-s="key">Local key</div><div class="th" data-s="ver" style="justify-content:flex-end">Ver</div>`;
   }
+  if(sortKey){ const th=h.querySelector(`.th[data-s="${sortKey}"]`);
+    if(th){ th.classList.add('active');
+      th.insertAdjacentHTML('beforeend',`<span class="chev">${sortDir===1?'▲':'▼'}</span>`); } }
   h.querySelectorAll('.th[data-s]').forEach(th=>th.onclick=()=>{ const k=th.dataset.s;
     if(sortKey===k){ if(sortDir===1)sortDir=-1; else{sortKey=null;sortDir=1;} } else {sortKey=k;sortDir=1;}
-    h.querySelectorAll('.th').forEach(x=>x.classList.remove('active'));
-    if(sortKey)th.classList.add('active'); render(); });
+    render(); });
 }
 
 function render(){
