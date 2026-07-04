@@ -145,7 +145,7 @@ function render(){
       if(!m.local_key){ keyCell=`<span class="empty">—</span>`; }
       else if(m.key_mismatch){
         keyCell=`<div class="keymm">`
-          +`<div class="copyable key" data-copy="${esc(m.local_key)}"><span class="txt" style="text-decoration:line-through;color:var(--red)">${esc(m.local_key)}</span></div>`
+          +`<div class="copyable key" data-copy="${esc(m.local_key)}"><span>⚠</span><span class="txt" style="color:var(--red);font-weight:700">${esc(m.local_key)}</span></div>`
           +`<div class="copyable key" data-copy="${esc(m.cloud_key)}"><span>→</span><span class="txt" style="color:var(--green);font-weight:700">${esc(m.cloud_key)}</span></div>`
           +`</div>`;
       } else {
