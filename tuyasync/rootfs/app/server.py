@@ -133,34 +133,66 @@ def _scan_blocking() -> list:
 
 
 # ----------------------------- HA operations ---------------------------------
+# HA config mounted read-only via `map: homeassistant_config:ro`
+HA_STORAGE = Path("/homeassistant/.storage/core.config_entries")
+
+
+def _read_entry_config() -> dict:
+    """
+    entry_id -> {host, local_key, protocol_version, poll_only, device_id}.
+    The config-entries API deliberately never exposes entry data/options
+    (local keys are secrets), so read HA's storage file directly (read-only;
+    all writes still go through the options flow).
+    """
+    try:
+        raw = json.loads(HA_STORAGE.read_text())
+    except Exception:
+        return {}
+    out = {}
+    for e in raw.get("data", {}).get("entries", []):
+        if e.get("domain") != "tuya_local":
+            continue
+        merged = {**(e.get("data") or {}), **(e.get("options") or {})}
+        out[e.get("entry_id")] = {
+            "host": merged.get("host", ""),
+            "local_key": merged.get("local_key", ""),
+            "protocol_version": str(merged.get("protocol_version", "")),
+            "poll_only": bool(merged.get("poll_only", False)),
+            "device_id": merged.get("device_id", ""),
+        }
+    return out
+
+
 async def _ha_get_tuya_entries() -> list:
     """List tuya_local config entries with their configured host/IP."""
     async with httpx.AsyncClient(timeout=20) as client:
-        # config entries aren't in the REST API; use the Supervisor-proxied
-        # WebSocket API via the core/api template render is not enough, so we
-        # call the dedicated config_entries endpoint through the frontend API.
+        # the API gives us runtime state (loaded/setup_retry); host/key/device_id
+        # come from the storage file via _read_entry_config()
         r = await client.get(
             "http://supervisor/core/api/config/config_entries/entry",
             headers=HA_HEADERS,
         )
         if r.status_code == 404:
             # older cores: fall back to the websocket bridge
-            return await _ha_ws_config_entries()
-        r.raise_for_status()
-        entries = r.json()
+            entries = await _ha_ws_config_entries()
+        else:
+            r.raise_for_status()
+            entries = r.json()
+    cfg = _read_entry_config()
     out = []
     for e in entries:
         if e.get("domain") != "tuya_local":
             continue
-        opts = e.get("options") or {}
+        c = cfg.get(e.get("entry_id"), {})
         out.append({
             "entry_id": e.get("entry_id"),
             "title": e.get("title"),
             "state": e.get("state"),
-            "host": opts.get("host", ""),
-            "local_key": opts.get("local_key", ""),
-            "protocol_version": opts.get("protocol_version", ""),
-            "poll_only": opts.get("poll_only", False),
+            "host": c.get("host", ""),
+            "local_key": c.get("local_key", ""),
+            "protocol_version": c.get("protocol_version", ""),
+            "poll_only": c.get("poll_only", False),
+            "device_id": c.get("device_id", ""),
         })
     return out
 
@@ -177,19 +209,7 @@ async def _ha_ws_config_entries() -> list:
         while True:
             msg = json.loads(await ws.recv())
             if msg.get("id") == 1 and msg.get("type") == "result":
-                entries = msg.get("result", [])
-                break
-    out = []
-    for e in entries:
-        if e.get("domain") != "tuya_local":
-            continue
-        out.append({
-            "entry_id": e.get("entry_id"),
-            "title": e.get("title"),
-            "state": e.get("state"),
-            "host": "", "local_key": "", "protocol_version": "", "poll_only": False,
-        })
-    return out
+                return msg.get("result", [])
 
 
 async def _ha_update_host(entry_id: str, new_host: str,
@@ -252,6 +272,12 @@ async def _ha_update_host(entry_id: str, new_host: str,
 async def _ha_update_host_rest(entry_id: str, new_host: str, local_key: str,
                                protocol_version: str, poll_only: bool) -> None:
     """REST implementation of the options-flow host update (preferred)."""
+    # tuya_local stores protocol_version as a float (3.3) except "auto";
+    # the options flow rejects the stringified form, so coerce it back.
+    try:
+        protocol_version = float(protocol_version)
+    except (TypeError, ValueError):
+        pass
     async with httpx.AsyncClient(timeout=30) as client:
         # 1) init the options flow
         r = await client.post(
@@ -278,13 +304,13 @@ async def _ha_update_host_rest(entry_id: str, new_host: str, local_key: str,
 def _build_mismatches() -> list:
     """Diff scanned IP (by device id) against HA's configured host."""
     scan_by_id = {d["id"]: d for d in STATE["snapshot"] if d.get("id")}
-    # cloud devices.json carries id<->name; HA entries carry host but title only.
-    # match HA entry -> cloud device by title==name to recover the device id.
+    # entries carry their device_id (from HA storage); fall back to matching
+    # the cloud list by title==name for entries that lack it.
     cloud_by_name = {d["name"]: d for d in STATE["devices"]}
     rows = []
     for e in STATE["ha_entries"]:
         cloud = cloud_by_name.get(e["title"])
-        dev_id = cloud["id"] if cloud else ""
+        dev_id = e.get("device_id") or (cloud["id"] if cloud else "")
         scanned = scan_by_id.get(dev_id)
         scanned_ip = scanned["ip"] if scanned else ""
         rows.append({
@@ -312,10 +338,23 @@ class FixRequest(BaseModel):
     poll_only: bool = False
 
 
+def _devices_with_lan() -> list:
+    """Cloud device list enriched with LAN IP/version from the last scan
+    (the Tuya cloud doesn't return LAN IPs)."""
+    scan_by_id = {d["id"]: d for d in STATE["snapshot"] if d.get("id")}
+    out = []
+    for d in STATE["devices"]:
+        s = scan_by_id.get(d.get("id"))
+        if s:
+            d = {**d, "ip": s["ip"] or d["ip"], "ver": s["ver"] or d["ver"]}
+        out.append(d)
+    return out
+
+
 @app.get("/api/state")
 async def get_state():
     return {
-        "devices": STATE["devices"],
+        "devices": _devices_with_lan(),
         "snapshot": STATE["snapshot"],
         "ha_entries": STATE["ha_entries"],
         "mismatches": _build_mismatches() if STATE["ha_entries"] else [],

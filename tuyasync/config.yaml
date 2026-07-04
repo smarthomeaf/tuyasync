@@ -1,5 +1,5 @@
 name: TuyaSync
-version: "1.0.3"
+version: "1.0.4"
 slug: tuyasync
 description: Scan, sync and repair Tuya Local devices with a live diff of scanned vs. configured IPs.
 url: "https://github.com/smarthomeaf/tuyasync"
@@ -23,6 +23,9 @@ homeassistant_api: true
 auth_api: true
 map:
   - share:rw
+  # read-only view of HA config: entry host/local_key live in
+  # .storage/core.config_entries, which the API never exposes
+  - homeassistant_config:ro
 options:
   api_key: ""
   api_secret: ""
