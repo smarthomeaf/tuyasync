@@ -438,11 +438,11 @@ async def fix_host(req: FixRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Fix failed: {e}")
-    # refresh HA entries so the UI reflects the new host
-    try:
-        STATE["ha_entries"] = await _ha_get_tuya_entries()
-    except Exception:
-        pass
+    # HA persists config entries with a delayed write, so re-reading storage
+    # now would still show the old host — update our cache optimistically.
+    for e in STATE["ha_entries"]:
+        if e["entry_id"] == req.entry_id:
+            e["host"] = req.new_host
     return {"ok": True, "entry_id": req.entry_id, "new_host": req.new_host}
 
 
