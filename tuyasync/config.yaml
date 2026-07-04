@@ -1,5 +1,5 @@
 name: TuyaSync
-version: "1.0.0"
+version: "1.0.1"
 slug: tuyasync
 description: Scan, sync and repair Tuya Local devices with a live diff of scanned vs. configured IPs.
 url: "https://github.com/smarthomeaf/tuyasync"
