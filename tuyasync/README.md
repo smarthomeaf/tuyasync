@@ -8,7 +8,12 @@ Scan, sync, and repair Tuya Local devices from a UI in your HA sidebar.
   cloud (via tinytuya) using your API credentials.
 - **⟲ Scan LAN** — broadcast-discovers reachable Tuya devices on your network and
   records their current IPs. Requires `host_network` (set) so it can reach your
-  IoT VLAN.
+  IoT VLAN. Any device Home Assistant has an IP for that doesn't answer the
+  broadcast is then probed directly on that IP, so devices on another subnet —
+  which can never hear a broadcast — are still found.
+- **Scan log** — collapsed under the buttons. Expand it to watch a scan happen
+  line by line, or to read back the last run afterwards. It survives a restart,
+  and **Copy** puts the whole thing on your clipboard.
 - **⌂ Refresh HA** — reads your `tuya_local` config entries and their configured
   `host` (IP).
 - **IP Mismatches tab** — diffs each device's *scanned* IP against the IP Home
@@ -33,8 +38,24 @@ stop moving.
 3. Install **TuyaSync**, then open the **Configuration** tab and set:
    - `api_key`, `api_secret`, `api_region` (e.g. `us`), `api_device_id`
      (any one device id from your account).
-   - `scan_retries` (default 6; raise to ~15–20 if devices are slow to answer).
+   - `scan_seconds` (default 18) — how long to listen for device broadcasts.
+     Raise it if devices announce themselves rarely. (This replaces
+     `scan_retries`, which despite the name was always this same number of
+     seconds; the old key is still accepted.)
 4. Start the add-on and open it from the sidebar.
+
+## "Not on LAN" for a device that clearly works
+
+Broadcast discovery only ever reaches devices on the add-on's own subnet, and
+even there, some devices announce themselves rarely. Tuya Local doesn't care —
+it connects straight to a known IP — so a device can be perfectly reachable in
+HA and still be silent to a broadcast scan.
+
+TuyaSync now probes those directly (see **Scan LAN** above), so this should
+resolve itself. If a device is still missing, expand the **Scan log** and look
+for the `force-scan` lines near the end: `Did not find ... by IP Address` means
+nothing answered on port 6668 at the IP HA has, which points at a genuinely
+wrong IP, a firewall rule between VLANs, or a device that's actually off.
 
 ## Security notes
 

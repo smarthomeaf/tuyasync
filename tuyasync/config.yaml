@@ -1,5 +1,5 @@
 name: TuyaSync
-version: "1.1.1"
+version: "1.2.0"
 slug: tuyasync
 description: Scan, sync and repair Tuya Local devices with a live diff of scanned vs. configured IPs.
 url: "https://github.com/smarthomeaf/tuyasync"
@@ -31,10 +31,16 @@ options:
   api_secret: ""
   api_region: "us"
   api_device_id: ""
-  scan_retries: 6
+  scan_seconds: 18
 schema:
   api_key: str?
   api_secret: password?
   api_region: list(us|eu|cn|in|eu-w|us-e)?
   api_device_id: str?
-  scan_retries: int(1,50)?
+  # How long to listen for device broadcasts, in seconds (tinytuya's own
+  # default is 18). Devices that never broadcast are probed directly instead.
+  scan_seconds: int(3,120)?
+  # Deprecated, ignored: this was never a retry count — tinytuya always
+  # treated it as the scan window in seconds. Kept in the schema only so
+  # upgrades with the old option still stored keep validating.
+  scan_retries: int(1,120)?

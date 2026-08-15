@@ -19,6 +19,12 @@ async function loadState(){
   render();
 }
 
+// pick up the last run on load, and latch on to a scan another tab started
+async function initLog(){
+  const j = await fetchLog();
+  if(j.running) startLogPolling(true);
+}
+
 async function doAction(btn, path, okMsg){
   btn.classList.add('loading'); btn.disabled=true;
   try{
@@ -32,8 +38,98 @@ async function doAction(btn, path, okMsg){
 }
 
 el('syncBtn').onclick = ()=>doAction(el('syncBtn'),'/api/sync','Cloud synced');
-el('scanBtn').onclick = ()=>doAction(el('scanBtn'),'/api/scan','LAN scanned');
 el('haBtn').onclick   = ()=>doAction(el('haBtn'),'/api/ha/refresh','HA refreshed');
+el('scanBtn').onclick = async ()=>{
+  // poll the log for the whole life of the request rather than trusting the
+  // running flag, which isn't set yet the instant we click
+  startLogPolling(false);
+  try{ await doAction(el('scanBtn'),'/api/scan','LAN scanned'); }
+  finally{ stopLogPolling(); await fetchLog(); }
+};
+
+// ---- scan log ----
+// Collapsed unless the user opened it before; the header still shows progress.
+let logSeq=0, logRunId=null, logPoll=null, logStopWhenIdle=false, logText=[];
+const logOpen = ()=>el('scanlog').classList.contains('open');
+
+function setLogOpen(on){
+  el('scanlog').classList.toggle('open',on);
+  el('scanlogBody').classList.toggle('hidden',!on);
+  el('scanlogCopy').classList.toggle('hidden',!on);
+  try{ localStorage.setItem('tuyasync.scanlog.open', on?'1':'0'); }catch(e){}
+  if(on) el('scanlogBody').scrollTop = el('scanlogBody').scrollHeight;
+}
+el('scanlogHead').onclick = ()=>setLogOpen(!logOpen());
+el('scanlogCopy').onclick = (ev)=>{ ev.stopPropagation();
+  copy(logText.join('\n'), el('scanlogCopy')); };
+try{ setLogOpen(localStorage.getItem('tuyasync.scanlog.open')==='1'); }catch(e){ setLogOpen(false); }
+
+function logClass(msg){
+  const m=msg.toLowerCase();
+  if(/error|fail|unable|no networks|did not find/.test(m)) return 'bad';
+  if(/force-scan|probe|not all devices/.test(m)) return 'probe';
+  if(/valid|found|complete|success/.test(m)) return 'hit';
+  return '';
+}
+
+function appendLogLines(lines){
+  const body=el('scanlogBody'), box=el('scanlogLines');
+  // only chase the tail if the user hasn't scrolled up to read something
+  const stick = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+  lines.forEach(l=>{
+    const t=fmtTime(l.t);
+    logText.push(`${t}  ${l.msg}`);
+    const d=document.createElement('div'); d.className='logline '+logClass(l.msg);
+    d.innerHTML=`<span class="lt">${esc(t)}</span><span class="lm">${esc(l.msg)}</span>`;
+    box.appendChild(d);
+  });
+  while(box.children.length>2000) box.removeChild(box.firstChild);
+  if(stick) body.scrollTop = body.scrollHeight;
+}
+
+function renderLogMeta(j){
+  el('scanlog').classList.toggle('live',!!j.running);
+  const n=j.seq||0;
+  if(j.running){
+    const secs=j.started?Math.round(Date.now()/1000-j.started):0;
+    el('scanlogMeta').textContent=`scanning… ${secs}s · ${n} line${n===1?'':'s'}`;
+  }else if(j.finished){
+    const took=j.started?Math.round(j.finished-j.started):0;
+    el('scanlogMeta').textContent=`last run ${fmtTime(j.finished)} · ${took}s · ${n} line${n===1?'':'s'}`;
+  }else{
+    el('scanlogMeta').textContent='no scan yet';
+  }
+  if(!n && !j.running) el('scanlogLines').innerHTML=
+    `<div class="scanlog-empty">Nothing logged yet — hit Scan LAN.</div>`;
+}
+
+async function fetchLog(){
+  let j;
+  try{
+    let r=await fetch(API('/api/scan/log?since='+logSeq)); j=await r.json();
+    if(j.run_id!==logRunId){   // new run: drop what we have and take it whole
+      logRunId=j.run_id; logSeq=0; logText=[]; el('scanlogLines').innerHTML='';
+      r=await fetch(API('/api/scan/log?since=0')); j=await r.json();
+    }
+  }catch(e){ return {running:false}; }
+  if(j.lines && j.lines.length){
+    appendLogLines(j.lines); logSeq=j.lines[j.lines.length-1].n;
+  }
+  renderLogMeta(j);
+  return j;
+}
+
+function startLogPolling(stopWhenIdle){
+  logStopWhenIdle=!!stopWhenIdle;
+  if(logPoll) return;
+  logPoll=setInterval(async()=>{
+    const j=await fetchLog();
+    if(logStopWhenIdle && !j.running) stopLogPolling();
+  },800);
+  fetchLog();
+}
+
+function stopLogPolling(){ clearInterval(logPoll); logPoll=null; el('scanlog').classList.remove('live'); }
 
 async function fixOne(m, btn){
   btn.disabled=true; btn.textContent='Fixing…';
@@ -185,3 +281,4 @@ function render(){
 }
 
 loadState();
+initLog();
