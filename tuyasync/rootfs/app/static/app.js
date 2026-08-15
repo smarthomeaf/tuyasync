@@ -268,7 +268,11 @@ function render(){
       if(!av)return 1; if(!bv)return -1; return av<bv?-sortDir:av>bv?sortDir:0; });
     list.forEach(d=>{
       const row=document.createElement('div'); row.className='row grid-dev';
-      const badge=d.sub?'<span class="badge sub">sub</span>':(d.ip?'<span class="badge lan">lan</span>':'');
+      // "probe" = answered a direct connection but not the ID handshake, so we
+      // know it's there without the scan being able to name it by itself
+      const badge=d.sub?'<span class="badge sub">sub</span>'
+        :(d.probed?'<span class="badge probe" title="Found by direct probe — answered on port 6668, but did not complete the identify handshake">probe</span>'
+        :(d.ip?'<span class="badge lan">lan</span>':''));
       const ipCell=d.ip?`<div class="copyable" data-copy="${esc(d.ip)}"><span class="txt">${esc(d.ip)}</span></div>`:`<span class="empty">— not on LAN</span>`;
       const keyCell=d.key?`<div class="copyable key" data-copy="${esc(d.key)}"><span>🔒</span><span class="txt">${esc(d.key)}</span></div>`:`<span class="empty">—</span>`;
       row.innerHTML=`<div class="name">${badge}<div><div>${esc(d.name)}</div><span class="id">${esc(d.id||'')}</span></div></div>

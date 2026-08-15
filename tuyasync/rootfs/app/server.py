@@ -518,15 +518,53 @@ class FixRequest(BaseModel):
     poll_only: bool = False
 
 
+def _snapshot_labeled() -> list:
+    """
+    The scan snapshot, with anonymous rows given a name.
+
+    A device that only answered a direct probe comes back with no name and no
+    gwId — answering on 6668 proves it is there, but identifying it needs a
+    handshake that can fail. Borrow the name from whatever HA has configured at
+    that IP so it doesn't show up as an anonymous row, and flag it as probed.
+    """
+    entry_by_ip = {e["host"]: e for e in STATE["ha_entries"] if e.get("host")}
+    out = []
+    for s in STATE["snapshot"]:
+        probed = not s.get("id")
+        e = entry_by_ip.get(s.get("ip"))
+        if probed and e:
+            s = {**s, "name": e["title"]}
+        out.append({**s, "probed": probed})
+    return out
+
+
 def _devices_with_lan() -> list:
     """Cloud device list enriched with LAN IP/version from the last scan
     (the Tuya cloud doesn't return LAN IPs)."""
     scan_by_id = {d["id"]: d for d in STATE["snapshot"] if d.get("id")}
+    scan_by_ip = {d["ip"]: d for d in STATE["snapshot"] if d.get("ip")}
+    # A probed-only device reports no gwId, so it can never match by id. Route
+    # around that through HA: cloud id -> the IP HA has configured -> the scan
+    # row at that IP. Without this the device is found by the scan and still
+    # reads "not on LAN" here.
+    host_by_id, host_by_name = {}, {}
+    for e in STATE["ha_entries"]:
+        if not e.get("host"):
+            continue
+        if e.get("device_id"):
+            host_by_id[e["device_id"]] = e["host"]
+        host_by_name[e["title"]] = e["host"]
     out = []
     for d in STATE["devices"]:
         s = scan_by_id.get(d.get("id"))
+        probed = False
+        if not s:
+            host = host_by_id.get(d.get("id")) or host_by_name.get(d.get("name"))
+            s = scan_by_ip.get(host) if host else None
+            probed = bool(s)
         if s:
-            d = {**d, "ip": s["ip"] or d["ip"], "ver": s["ver"] or d["ver"]}
+            d = {**d, "ip": s["ip"] or d["ip"], "ver": s["ver"] or d["ver"],
+                 "probed": probed}
         out.append(d)
     return out
 
@@ -535,7 +573,7 @@ def _devices_with_lan() -> list:
 async def get_state():
     return {
         "devices": _devices_with_lan(),
-        "snapshot": STATE["snapshot"],
+        "snapshot": _snapshot_labeled(),
         "ha_entries": STATE["ha_entries"],
         "mismatches": _build_mismatches() if STATE["ha_entries"] else [],
         "last_scan": STATE["last_scan"],
