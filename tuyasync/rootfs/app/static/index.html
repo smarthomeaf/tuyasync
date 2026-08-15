@@ -106,6 +106,30 @@
   .toggle .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-dim)}
   .toggle.armed .dot{background:var(--amber);box-shadow:0 0 8px var(--amber)}
 
+  /* collapsed by default: a scan is only interesting when it goes wrong */
+  .scanlog{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin:0 0 22px;overflow:hidden}
+  .scanlog-head{display:flex;align-items:center;gap:10px;padding:10px 16px;cursor:pointer;user-select:none;
+    font-size:12px;color:var(--ink-dim)}
+  .scanlog-head:hover{color:var(--ink)}
+  .scanlog-head .chev{font-size:9px;width:9px;transition:transform .15s;color:var(--ink-faint)}
+  .scanlog.open .scanlog-head .chev{transform:rotate(90deg)}
+  .scanlog-title{font-weight:600;color:var(--ink);font-size:13px}
+  .scanlog-meta{font-family:var(--mono);font-size:11px;color:var(--ink-faint);flex:1;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .scanlog-dot{width:7px;height:7px;border-radius:50%;background:transparent;flex:none}
+  .scanlog.live .scanlog-dot{background:var(--amber);box-shadow:0 0 8px var(--amber);animation:pulse 1.1s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  .scanlog-copy{font-size:11px;color:var(--ink-faint);padding:3px 8px;border-radius:6px;border:1px solid var(--line)}
+  .scanlog-copy:hover{color:var(--cyan);border-color:var(--cyan)}
+  .scanlog-body{border-top:1px solid var(--line);background:#0b101a;max-height:260px;overflow-y:auto}
+  .scanlog-lines{padding:10px 16px;font-family:var(--mono);font-size:11.5px;line-height:1.65}
+  .logline{display:flex;gap:12px}
+  .logline .lt{color:var(--ink-faint);flex:none}
+  .logline .lm{color:var(--ink-dim);white-space:pre-wrap;word-break:break-word}
+  .logline.hit .lm{color:var(--green)} .logline.bad .lm{color:var(--red)}
+  .logline.probe .lm{color:var(--amber)}
+  .scanlog-empty{color:var(--ink-faint);font-family:var(--mono);font-size:11.5px;padding:10px 16px}
+
   .banner{padding:12px 18px;border-radius:12px;margin-bottom:16px;font-size:13px;display:none}
   .banner.show{display:block}
   .banner.err{background:var(--red-soft);border:1px solid var(--red);color:var(--red)}
@@ -132,6 +156,19 @@
     <button class="btn primary" id="syncBtn"><span class="spin"></span><span class="lbl">☁ Sync from Cloud</span></button>
     <button class="btn" id="scanBtn"><span class="spin"></span><span class="lbl">⟲ Scan LAN</span></button>
     <button class="btn" id="haBtn"><span class="spin"></span><span class="lbl">⌂ Refresh HA</span></button>
+  </div>
+
+  <div class="scanlog" id="scanlog">
+    <div class="scanlog-head" id="scanlogHead">
+      <span class="chev">▶</span>
+      <span class="scanlog-title">Scan log</span>
+      <span class="scanlog-meta" id="scanlogMeta">no scan yet</span>
+      <span class="scanlog-dot"></span>
+      <span class="scanlog-copy hidden" id="scanlogCopy">Copy</span>
+    </div>
+    <div class="scanlog-body hidden" id="scanlogBody">
+      <div class="scanlog-lines" id="scanlogLines"></div>
+    </div>
   </div>
 
   <div class="stats" id="stats"></div>
