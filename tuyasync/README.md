@@ -52,10 +52,17 @@ it connects straight to a known IP — so a device can be perfectly reachable in
 HA and still be silent to a broadcast scan.
 
 TuyaSync now probes those directly (see **Scan LAN** above), so this should
-resolve itself. If a device is still missing, expand the **Scan log** and look
-for the `force-scan` lines near the end: `Did not find ... by IP Address` means
-nothing answered on port 6668 at the IP HA has, which points at a genuinely
-wrong IP, a firewall rule between VLANs, or a device that's actually off.
+resolve itself. Expand the **Scan log** and look near the end for what the
+force-scan said about the device:
+
+- **`Did not find ... by IP Address`** — nothing answered on port 6668 at the IP
+  HA has. That points at a genuinely wrong IP, a firewall rule between VLANs,
+  or a device that's actually off.
+- **`Failed to Force-Scan, FORCED STOP`** with `Device ID = (len:0)` — the
+  device *did* answer, so it's definitely there, but the scan ended before the
+  identify handshake finished. These show up with a **`probe`** badge: found and
+  usable, just not identified by the scan itself. Raising `scan_seconds` gives
+  the handshake more room to complete.
 
 ## Security notes
 
