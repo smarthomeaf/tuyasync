@@ -12,13 +12,18 @@ so no long-lived user token is needed.
 """
 
 import asyncio
+import contextlib
+import io
 import json
 import os
+import re
+import threading
 import time
 from pathlib import Path
 
 import httpx
 import tinytuya
+from tinytuya import scanner as tuya_scanner
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,7 +34,13 @@ API_KEY = os.environ.get("TUYA_API_KEY", "")
 API_SECRET = os.environ.get("TUYA_API_SECRET", "")
 API_REGION = os.environ.get("TUYA_API_REGION", "us")
 API_DEVICE_ID = os.environ.get("TUYA_API_DEVICE_ID", "")
-SCAN_RETRIES = int(os.environ.get("TUYA_SCAN_RETRIES", "6"))
+# How long to listen for device broadcasts. This was previously exposed as
+# `scan_retries`, which was a misnomer: tinytuya passes it straight through as
+# `scantime` (seconds), and its own default is 18 — the old default of 6 gave
+# slow-announcing devices far too little time to show up.
+SCAN_TIME = int(os.environ.get("TUYA_SCAN_TIME")
+                or os.environ.get("TUYA_SCAN_RETRIES")
+                or tinytuya.SCANTIME)
 WORKDIR = Path(os.environ.get("TUYA_WORKDIR", "/share/tuyasync"))
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 
@@ -43,6 +54,7 @@ HA_HEADERS = {
 WORKDIR.mkdir(parents=True, exist_ok=True)
 DEVICES_JSON = WORKDIR / "devices.json"
 SNAPSHOT_JSON = WORKDIR / "snapshot.json"
+SCANLOG_JSON = WORKDIR / "scanlog.json"
 
 app = FastAPI(title="TuyaSync")
 
@@ -55,6 +67,89 @@ STATE: dict = {
     "last_sync": None,
     "version": "",      # add-on version, from Supervisor at startup
 }
+
+
+# ----------------------------- scan log --------------------------------------
+# The LAN scan is the one operation that regularly "fails" in a way the result
+# alone can't explain (a device HA talks to fine simply never broadcasts to us).
+# So we tee tinytuya's own verbose output into a ring buffer the UI can poll
+# live and re-read afterwards.
+SCAN_LOG_MAX = 2000
+
+SCAN_LOG: dict = {
+    "run_id": 0,        # bumped per scan so the UI can tell runs apart
+    "seq": 0,           # monotonic line counter; the UI polls with ?since=
+    "running": False,
+    "started": None,
+    "finished": None,
+    "lines": [],        # [{"n": seq, "t": epoch, "msg": str}]
+}
+
+_log_lock = threading.Lock()
+_scan_lock = threading.Lock()   # one scan at a time (stdout capture is global)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _log(msg: str) -> None:
+    """Append one line to the scan log, newest last."""
+    msg = _ANSI_RE.sub("", str(msg)).rstrip()
+    if not msg:
+        return
+    with _log_lock:
+        SCAN_LOG["seq"] += 1
+        SCAN_LOG["lines"].append({"n": SCAN_LOG["seq"], "t": time.time(), "msg": msg})
+        # keep the buffer bounded; a force-scan over a /24 is chatty
+        del SCAN_LOG["lines"][:-SCAN_LOG_MAX]
+
+
+class _LogWriter(io.TextIOBase):
+    """
+    stdout stand-in that turns tinytuya's prints into scan-log lines.
+
+    tinytuya writes progress with plain print(), and redraws some of it with
+    carriage returns, so treat both \\n and \\r as line terminators.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        self._buf += s
+        while True:
+            breaks = [p for p in (self._buf.find("\n"), self._buf.find("\r")) if p >= 0]
+            if not breaks:
+                break
+            i = min(breaks)
+            line, self._buf = self._buf[:i], self._buf[i + 1:]
+            _log(line)
+        return len(s)
+
+    def flush(self) -> None:
+        if self._buf:
+            _log(self._buf)
+            self._buf = ""
+
+
+def _scan_log_begin() -> None:
+    with _log_lock:
+        SCAN_LOG["run_id"] += 1
+        SCAN_LOG["lines"] = []
+        SCAN_LOG["running"] = True
+        SCAN_LOG["started"] = time.time()
+        SCAN_LOG["finished"] = None
+
+
+def _scan_log_end() -> None:
+    with _log_lock:
+        SCAN_LOG["running"] = False
+        SCAN_LOG["finished"] = time.time()
+        snap = {k: SCAN_LOG[k] for k in
+                ("run_id", "seq", "started", "finished", "lines")}
+    # persist so the last run is still readable after an add-on restart
+    try:
+        SCANLOG_JSON.write_text(json.dumps(snap))
+    except Exception:
+        pass
 
 
 # ----------------------------- helpers ---------------------------------------
@@ -95,6 +190,14 @@ def _load_cached_files() -> None:
             STATE["snapshot"] = [_norm_scan(d) for d in arr]
         except Exception:
             pass
+    if SCANLOG_JSON.exists():
+        try:
+            raw = json.loads(SCANLOG_JSON.read_text())
+            SCAN_LOG.update({k: raw[k] for k in
+                             ("run_id", "seq", "started", "finished", "lines")
+                             if k in raw})
+        except Exception:
+            pass
 
 
 # ----------------------------- Tuya operations -------------------------------
@@ -120,14 +223,47 @@ def _cloud_sync_blocking() -> list:
     return [_norm_cloud(d) for d in devices]
 
 
-def _scan_blocking() -> list:
-    """Broadcast-scan the LAN for reachable Tuya devices. Runs in a thread."""
+def _scan_blocking(want_ips: list) -> list:
+    """
+    Discover reachable Tuya devices on the LAN. Runs in a thread.
+
+    Two-stage on purpose. Broadcast discovery (UDP 6666/6667/7000) only ever
+    reaches devices on our own subnet, and even there some devices announce
+    themselves rarely — which is why a device Tuya Local talks to happily
+    (it connects unicast to a known IP) can look completely absent here.
+    So we also hand tinytuya the IPs Home Assistant already has configured via
+    `wantips`: any of those still unheard from when the broadcast window closes
+    gets probed directly over TCP 6668 instead of being written off.
+
+    Note that `wantips` also lets the scan finish as soon as every wanted IP is
+    accounted for, so a healthy network returns well before the full window.
+    """
     # tinytuya reads devices.json (names + local keys) from the CWD to enrich
     # scan results, so run from WORKDIR where cloud sync writes it.
     os.chdir(WORKDIR)
-    # deviceScan returns {ip: {...}} keyed by IP
-    found = tinytuya.deviceScan(False, SCAN_RETRIES)
+    _log(f"Broadcast window: {SCAN_TIME}s on UDP 6666/6667/7000")
+    if want_ips:
+        _log(f"Will directly probe {len(want_ips)} HA-configured IP(s) if they "
+             f"stay silent: {', '.join(want_ips)}")
+    else:
+        _log("No HA hosts known yet — broadcast only. Run 'Refresh HA' first to "
+             "enable direct probing of configured IPs.")
+    writer = _LogWriter()
+    try:
+        with contextlib.redirect_stdout(writer):
+            # returns {ip: {...}} keyed by IP, same as tinytuya.deviceScan()
+            found = tuya_scanner.devices(
+                verbose=True,        # the whole point: we want its progress
+                color=False,         # no ANSI escapes to strip out
+                scantime=SCAN_TIME,
+                wantips=want_ips or None,
+                show_timer=False,    # its countdown redraw would flood the log
+                assume_yes=True,     # never prompt: there is no stdin in here
+            )
+    finally:
+        writer.flush()
     devices = list(found.values())
+    _log(f"Scan complete — {len(devices)} device(s) found")
     snapshot = {"timestamp": time.time(), "devices": devices}
     SNAPSHOT_JSON.write_text(json.dumps(snapshot, indent=2))
     return [_norm_scan(d) for d in devices]
@@ -339,6 +475,9 @@ async def _ha_update_host_rest(entry_id: str, new_host: str, local_key: str,
 def _build_mismatches() -> list:
     """Diff scanned IP + configured local key (per device) against the cloud."""
     scan_by_id = {d["id"]: d for d in STATE["snapshot"] if d.get("id")}
+    # a directly-probed device may come back without a usable gwId, so keep an
+    # IP index too — answering on its configured IP is proof enough it is there
+    scan_by_ip = {d["ip"]: d for d in STATE["snapshot"] if d.get("ip")}
     # entries carry their device_id (from HA storage); fall back to matching
     # the cloud list by title==name for entries that lack it.
     cloud_by_id = {d["id"]: d for d in STATE["devices"] if d.get("id")}
@@ -347,7 +486,7 @@ def _build_mismatches() -> list:
     for e in STATE["ha_entries"]:
         cloud = cloud_by_name.get(e["title"])
         dev_id = e.get("device_id") or (cloud["id"] if cloud else "")
-        scanned = scan_by_id.get(dev_id)
+        scanned = scan_by_id.get(dev_id) or scan_by_ip.get(e["host"])
         scanned_ip = scanned["ip"] if scanned else ""
         # authoritative key from the cloud (only when we actually have it)
         cloud_key = (cloud_by_id.get(dev_id) or cloud or {}).get("key", "")
@@ -403,6 +542,8 @@ async def get_state():
         "last_sync": STATE["last_sync"],
         "version": STATE["version"],
         "creds_configured": bool(API_KEY and API_SECRET and API_DEVICE_ID),
+        "scan_running": SCAN_LOG["running"],
+        "scan_time": SCAN_TIME,
     }
 
 
@@ -419,13 +560,37 @@ async def cloud_sync():
 
 @app.post("/api/scan")
 async def lan_scan():
+    if not _scan_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A scan is already running.")
+    # the IPs HA expects each device at — anything silent gets probed directly
+    want_ips = sorted({e["host"] for e in STATE["ha_entries"] if e.get("host")})
+    _scan_log_begin()
     try:
-        snapshot = await asyncio.to_thread(_scan_blocking)
+        snapshot = await asyncio.to_thread(_scan_blocking, want_ips)
     except Exception as e:
+        _log(f"ERROR: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        _scan_log_end()
+        _scan_lock.release()
     STATE["snapshot"] = snapshot
     STATE["last_scan"] = time.time()
     return {"count": len(snapshot), "snapshot": snapshot}
+
+
+@app.get("/api/scan/log")
+async def scan_log(since: int = 0):
+    """Lines newer than `since`. Polled while a scan runs; also serves the
+    last completed run so a missed scan can still be read back."""
+    with _log_lock:
+        return {
+            "run_id": SCAN_LOG["run_id"],
+            "seq": SCAN_LOG["seq"],
+            "running": SCAN_LOG["running"],
+            "started": SCAN_LOG["started"],
+            "finished": SCAN_LOG["finished"],
+            "lines": [l for l in SCAN_LOG["lines"] if l["n"] > since],
+        }
 
 
 @app.post("/api/ha/refresh")
