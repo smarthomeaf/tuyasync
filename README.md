@@ -3,6 +3,15 @@
 Home Assistant add-on repository for **TuyaSync** — scan, sync, and repair
 Tuya Local devices from a UI in your HA sidebar.
 
+## Releasing — what "all servers" means here
+
+🔴 **"Upgrade/update all servers" means every deployment target of THIS project — not every
+service on Nuno's boxes, and not another project.** His clarification (2026-08-19). TuyaSync has
+**no server of its own**: it ships as a Home Assistant add-on. Releasing = bump the version in
+`tuyasync/config.yaml`, push this repo (`github.com/smarthomeaf/tuyasync`, `gh` authed as
+`smarthomeaf`), then Nuno updates the add-on from the HA Add-on Store. Nothing here touches
+`10.190.0.111`, which hosts unrelated projects.
+
 ## Installation
 
 1. In Home Assistant: **Settings → Add-ons → Add-on Store → ⋮ → Repositories**.
