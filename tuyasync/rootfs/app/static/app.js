@@ -40,11 +40,30 @@ async function doAction(btn, path, okMsg){
 el('syncBtn').onclick = ()=>doAction(el('syncBtn'),'/api/sync','Cloud synced');
 el('haBtn').onclick   = ()=>doAction(el('haBtn'),'/api/ha/refresh','HA refreshed');
 el('scanBtn').onclick = async ()=>{
+  const btn=el('scanBtn');
+  btn.classList.add('loading'); btn.disabled=true;
   // poll the log for the whole life of the request rather than trusting the
   // running flag, which isn't set yet the instant we click
   startLogPolling(false);
-  try{ await doAction(el('scanBtn'),'/api/scan','LAN scanned'); }
-  finally{ stopLogPolling(); await fetchLog(); }
+  let following=false;
+  try{
+    const r = await fetch(API('/api/scan'),{method:'POST'});
+    const j = await r.json();
+    if(r.status===409){
+      // a scan is already going (another tab, or this one before a reload).
+      // That's not an error worth a red banner — just watch the one running.
+      banner(''); showToast('Scan already running — following it');
+      setLogOpen(true); startLogPolling(true); following=true;
+      return;
+    }
+    if(!r.ok) throw new Error(j.detail||'request failed');
+    showToast('LAN scanned');
+    await loadState();
+  }catch(e){ banner(e.message,'err'); }
+  finally{
+    btn.classList.remove('loading'); btn.disabled=false;
+    if(!following){ stopLogPolling(); await fetchLog(); }
+  }
 };
 
 // ---- scan log ----

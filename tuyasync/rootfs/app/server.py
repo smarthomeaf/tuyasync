@@ -133,6 +133,7 @@ class _LogWriter(io.TextIOBase):
 def _scan_log_begin() -> None:
     with _log_lock:
         SCAN_LOG["run_id"] += 1
+        SCAN_LOG["seq"] = 0
         SCAN_LOG["lines"] = []
         SCAN_LOG["running"] = True
         SCAN_LOG["started"] = time.time()
@@ -596,21 +597,40 @@ async def cloud_sync():
     return {"count": len(devices), "devices": devices}
 
 
+def _scan_job(want_ips: list) -> list:
+    """Run the scan and own the lock for exactly as long as it actually runs."""
+    try:
+        return _scan_blocking(want_ips)
+    except Exception as e:
+        _log(f"ERROR: {e}")
+        raise
+    finally:
+        _scan_log_end()
+        _scan_lock.release()
+
+
 @app.post("/api/scan")
 async def lan_scan():
     if not _scan_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A scan is already running.")
-    # the IPs HA expects each device at — anything silent gets probed directly
-    want_ips = sorted({e["host"] for e in STATE["ha_entries"] if e.get("host")})
-    _scan_log_begin()
     try:
-        snapshot = await asyncio.to_thread(_scan_blocking, want_ips)
-    except Exception as e:
-        _log(f"ERROR: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        _scan_log_end()
+        # the IPs HA expects each device at — anything silent gets probed directly
+        want_ips = sorted({e["host"] for e in STATE["ha_entries"] if e.get("host")})
+        _scan_log_begin()
+    except BaseException:
+        # nothing has started yet, so this request still owns the lock — if we
+        # let it escape held, every later scan answers 409 until a restart
         _scan_lock.release()
+        raise
+    # From here the worker owns the lock and releases it when the scan really
+    # ends. A client that disconnects mid-scan (a reload, or ingress giving up
+    # on a slow run) cancels this coroutine, but the thread keeps going;
+    # releasing here would let a second scan start on top of the first, and the
+    # two would fight over the process-wide cwd and stdout redirect.
+    try:
+        snapshot = await asyncio.to_thread(_scan_job, want_ips)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
     STATE["snapshot"] = snapshot
     STATE["last_scan"] = time.time()
     return {"count": len(snapshot), "snapshot": snapshot}
