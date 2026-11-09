@@ -1,6 +1,8 @@
 // TuyaSync front-end. Talks to the FastAPI backend on the same origin (ingress).
 const API = (p) => `.${p}`;  // ingress serves under a base path; relative keeps it working
 let STATE = { devices:[], snapshot:[], ha_entries:[], mismatches:[], creds_configured:false };
+let DPS = {};                 // device_id -> DP model + values
+let dpsOpen = {};             // device_id -> expanded in the Data Points tab
 let view = 'mismatches';
 let sortKey = null, sortDir = 1, catFilter = 'all';
 const el = id => document.getElementById(id);
@@ -17,6 +19,11 @@ async function loadState(){
   if(!STATE.creds_configured) banner('Cloud credentials not set — add API key/secret/device-id in the add-on Configuration tab to enable Sync.','warn');
   else banner('');
   render();
+}
+
+async function loadDps(){
+  try{ const r = await fetch(API('/api/dps')); const j = await r.json(); DPS = j.dps || {}; }
+  catch(e){ DPS = {}; }
 }
 
 // pick up the last run on load, and latch on to a scan another tab started
@@ -66,6 +73,29 @@ el('scanBtn').onclick = async ()=>{
   }
 };
 
+el('dpsBtn').onclick = async ()=>{
+  const btn=el('dpsBtn');
+  btn.classList.add('loading'); btn.disabled=true;
+  startLogPolling(false);
+  let following=false;
+  try{
+    const r = await fetch(API('/api/dps'),{method:'POST'});
+    const j = await r.json();
+    if(r.status===409){
+      banner(''); showToast('A job is already running — following it');
+      setLogOpen(true); startLogPolling(true); following=true;
+      return;
+    }
+    if(!r.ok) throw new Error(j.detail||'request failed');
+    showToast(`Data points: ${j.count} device(s)` + (j.failed?`, ${j.failed} failed`:''));
+    await loadDps(); await loadState();
+  }catch(e){ banner(e.message,'err'); }
+  finally{
+    btn.classList.remove('loading'); btn.disabled=false;
+    if(!following){ stopLogPolling(); await fetchLog(); }
+  }
+};
+
 // ---- scan log ----
 // Collapsed unless the user opened it before; the header still shows progress.
 let logSeq=0, logRunId=null, logPoll=null, logStopWhenIdle=false, logText=[];
@@ -108,10 +138,12 @@ function appendLogLines(lines){
 
 function renderLogMeta(j){
   el('scanlog').classList.toggle('live',!!j.running);
+  el('scanlogTitle').textContent = j.job==='dps' ? 'Data points log' : 'Scan log';
   const n=j.seq||0;
   if(j.running){
     const secs=j.started?Math.round(Date.now()/1000-j.started):0;
-    el('scanlogMeta').textContent=`scanning… ${secs}s · ${n} line${n===1?'':'s'}`;
+    const verb = j.job==='dps' ? 'reading' : 'scanning';
+    el('scanlogMeta').textContent=`${verb}… ${secs}s · ${n} line${n===1?'':'s'}`;
   }else if(j.finished){
     const took=j.started?Math.round(j.finished-j.started):0;
     el('scanlogMeta').textContent=`last run ${fmtTime(j.finished)} · ${took}s · ${n} line${n===1?'':'s'}`;
@@ -168,6 +200,61 @@ async function fixOne(m, btn){
   }catch(e){ banner(e.message,'err'); btn.disabled=false; btn.textContent='Fix'; }
 }
 
+// ---- data points ----
+// One row per cloud device, its DP table folded underneath.
+function dpsRows(){
+  return (STATE.devices||[]).map(d=>({
+    id:d.id, name:d.name||'(unnamed)', product_id:d.product_id||'', dp:DPS[d.id]||null }));
+}
+
+function dpRange(v){
+  if(!v||typeof v!=='object') return '';
+  if(Array.isArray(v.range)) return v.range.join(' · ');
+  if(v.min!==undefined||v.max!==undefined){
+    let t=`${v.min??'?'}..${v.max??'?'}`;
+    if(v.unit) t+=` ${v.unit}`;
+    if(v.scale) t+=` /10^${v.scale}`;
+    if(v.step&&v.step!==1) t+=` step ${v.step}`;
+    return t;
+  }
+  if(Array.isArray(v.label)) return v.label.join(' · ');
+  return '';
+}
+
+function dpDetail(r){
+  const wrap=document.createElement('div'); wrap.className='dpdetail';
+  const dp=r.dp;
+  if(!dp){ wrap.innerHTML=`<div class="dpnote">Not read yet — hit Read Data Points.</div>`; return wrap; }
+  let html='';
+  if(dp.error) html+=`<div class="dperr">⚠ ${esc(dp.error)}</div>`;
+  const ids=Object.keys(dp.dps||{}).sort((a,b)=>Number(a)-Number(b));
+  if(ids.length){
+    html+=`<div class="dpscroll"><table class="dptable"><thead><tr>`
+      +`<th>DP</th><th>Code</th><th>Type</th><th>Value</th><th>Range / enum</th><th></th>`
+      +`</tr></thead><tbody>`;
+    ids.forEach(id=>{
+      const d=dp.dps[id], has=Object.prototype.hasOwnProperty.call(dp.values||{},id);
+      const val=has?dp.values[id]:null;
+      html+=`<tr><td class="dpid">${esc(id)}</td><td class="dpcode">${esc(d.code||'')}</td>`
+        +`<td>${esc(d.type||'')}</td>`
+        +`<td class="dpval">${has?esc(typeof val==='object'?JSON.stringify(val):String(val)):'—'}</td>`
+        +`<td>${esc(dpRange(d.values))}</td>`
+        +`<td>${d.writable?'<span class="dpw">write</span>':''}</td></tr>`;
+    });
+    html+=`</tbody></table></div>`;
+  }
+  const um=Object.keys(dp.unmapped||{});
+  if(um.length) html+=`<div class="dpnote">Reported but absent from the spec: `
+    +um.map(k=>`${esc(k)}=${esc(String(dp.unmapped[k]))}`).join(', ')+`</div>`;
+  if(ids.length) html+=`<div class="dpnote">`
+    +`<span class="copyable" data-copyjson="${esc(r.id)}">⧉ Copy this device as JSON</span></div>`;
+  wrap.innerHTML=html;
+  wrap.onclick=ev=>ev.stopPropagation();
+  const c=wrap.querySelector('[data-copyjson]');
+  if(c) c.onclick=()=>copy(JSON.stringify(dp,null,2),c);
+  return wrap;
+}
+
 // ---- rendering ----
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
@@ -191,6 +278,18 @@ function renderStats(){
       <div class="stat mm ${catFilter==='keymismatch'?'active':''}" data-f="keymismatch"><span class="n">${km}</span><span class="l">Key Mismatch</span></div>
       <div class="stat off ${catFilter==='offline'?'active':''}" data-f="offline"><span class="n">${off}</span><span class="l">Offline</span></div>
       <div class="stat on ${catFilter==='lan'?'active':''}" data-f="lan"><span class="n">${onlan}</span><span class="l">Seen on LAN</span></div>`;
+  }else if(view==='dps'){
+    const rows=dpsRows();
+    const withDps=rows.filter(r=>r.dp && Object.keys(r.dp.dps||{}).length).length;
+    const errs=rows.filter(r=>r.dp && r.dp.error).length;
+    const unread=rows.filter(r=>!r.dp).length;
+    const unmapped=rows.filter(r=>r.dp && Object.keys(r.dp.unmapped||{}).length).length;
+    s.innerHTML=`
+      <div class="stat ${catFilter==='all'?'active':''}" data-f="all"><span class="n">${rows.length}</span><span class="l">Devices</span></div>
+      <div class="stat on ${catFilter==='withdps'?'active':''}" data-f="withdps"><span class="n">${withDps}</span><span class="l">With DPs</span></div>
+      <div class="stat ${catFilter==='unread'?'active':''}" data-f="unread"><span class="n">${unread}</span><span class="l">Not read</span></div>
+      <div class="stat mm ${catFilter==='dpserr'?'active':''}" data-f="dpserr"><span class="n">${errs}</span><span class="l">Failed</span></div>
+      <div class="stat ${catFilter==='unmapped'?'active':''}" data-f="unmapped"><span class="n">${unmapped}</span><span class="l">Unmapped</span></div>`;
   }else{
     const list = STATE.devices.length?STATE.devices:STATE.snapshot;
     const on=list.filter(d=>d.ip).length, subs=list.filter(d=>d.sub).length;
@@ -211,6 +310,9 @@ function renderHead(){
       <div class="th" data-s="scan">Scanned</div><div class="th" data-s="key">Local key (HA)</div>
       <div class="th" data-s="state">State</div>
       <div class="th" data-s="action" style="justify-content:flex-end">Action</div>`;
+  }else if(view==='dps'){ h.className='thead grid-dps';
+    h.innerHTML=`<div class="th" data-s="name">Device</div><div class="th" data-s="product">Product ID</div>
+      <div class="th" data-s="count">DPs</div><div class="th" data-s="read">Read</div>`;
   }else{ h.className='thead grid-dev';
     h.innerHTML=`<div class="th" data-s="name">Device</div><div class="th" data-s="ip">IP</div>
       <div class="th" data-s="key">Local key</div><div class="th" data-s="ver" style="justify-content:flex-end">Ver</div>`;
@@ -274,6 +376,40 @@ function render(){
       rows.appendChild(row);
     });
     if(!list.length) rows.innerHTML=`<div class="row"><div class="nochange" style="padding:20px">No devices — run Refresh HA and Scan LAN.</div></div>`;
+  }else if(view==='dps'){
+    let list=dpsRows();
+    if(catFilter==='withdps')list=list.filter(r=>r.dp&&Object.keys(r.dp.dps||{}).length);
+    else if(catFilter==='unread')list=list.filter(r=>!r.dp);
+    else if(catFilter==='dpserr')list=list.filter(r=>r.dp&&r.dp.error);
+    else if(catFilter==='unmapped')list=list.filter(r=>r.dp&&Object.keys(r.dp.unmapped||{}).length);
+    if(q)list=list.filter(r=>r.name.toLowerCase().includes(q)||(r.id||'').includes(q)
+      ||(r.dp?Object.values(r.dp.dps||{}).some(d=>(d.code||'').toLowerCase().includes(q)):false));
+    if(sortKey)list.sort((a,b)=>{
+      if(sortKey==='count')return ((a.dp?Object.keys(a.dp.dps||{}).length:-1)-(b.dp?Object.keys(b.dp.dps||{}).length:-1))*sortDir;
+      if(sortKey==='read')return (((a.dp&&a.dp.fetched)||0)-((b.dp&&b.dp.fetched)||0))*sortDir;
+      const av=(sortKey==='product'?(a.product_id||''):a.name).toLowerCase();
+      const bv=(sortKey==='product'?(b.product_id||''):b.name).toLowerCase();
+      return av<bv?-sortDir:av>bv?sortDir:0; });
+    else list.sort((a,b)=>a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+    list.forEach(r=>{
+      const dp=r.dp, n=dp?Object.keys(dp.dps||{}).length:0;
+      const row=document.createElement('div'); row.className='row grid-dps'+(dpsOpen[r.id]?' open':'');
+      const badge = !dp ? '<span class="badge nodps">not read</span>'
+        : dp.error ? '<span class="badge retry">failed</span>'
+        : `<span class="badge dps">${n} dp${n===1?'':'s'}</span>`;
+      row.innerHTML=`<div class="name"><span class="expander">▶</span><div><div>${esc(r.name)}</div>
+          <span class="id">${esc(r.id||'')}</span></div></div>
+        <div class="copyable" data-copy="${esc(r.product_id||'')}"><span class="txt">${esc(r.product_id||'—')}</span></div>
+        <div>${badge}</div>
+        <div class="ver">${dp&&dp.fetched?esc(fmtTime(dp.fetched)):'—'}</div>`;
+      row.querySelectorAll('.copyable[data-copy]').forEach(nd=>nd.onclick=ev=>{
+        ev.stopPropagation(); copy(nd.dataset.copy,nd); });
+      row.onclick=()=>{ dpsOpen[r.id]=!dpsOpen[r.id]; render(); };
+      rows.appendChild(row);
+      if(dpsOpen[r.id]) rows.appendChild(dpDetail(r));
+    });
+    if(!list.length) rows.innerHTML=`<div class="row"><div class="nochange" style="padding:20px">`
+      +`No devices — run Sync from Cloud, then Read Data Points.</div></div>`;
   }else{
     let list=(STATE.devices.length?STATE.devices:STATE.snapshot).slice();
     if(catFilter==='lan')list=list.filter(d=>d.ip);
@@ -304,4 +440,5 @@ function render(){
 }
 
 loadState();
+loadDps().then(render);
 initLog();
