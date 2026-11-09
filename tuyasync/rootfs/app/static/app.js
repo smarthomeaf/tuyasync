@@ -221,6 +221,31 @@ function dpRange(v){
   return '';
 }
 
+// Build a Tuya Local device config from what we read off the device. The
+// numbers are the device's own, so this is a starting point to review rather
+// than something to trust blindly -- entity choices come from DP code names.
+async function genConfig(r, btn, out){
+  btn.disabled=true; const label=btn.textContent; btn.textContent='Generating…';
+  try{
+    const res=await fetch(API('/api/config/generate?device_id=')+encodeURIComponent(r.id),
+      {method:'POST'});
+    const j=await res.json();
+    if(!res.ok) throw new Error(j.detail||'generate failed');
+    const warn=(j.warnings||[]).map(w=>`<div class="cfgwarn">⚠ ${esc(w)}</div>`).join('');
+    out.innerHTML=warn
+      +`<div class="cfgpath">Saved to <code>${esc(j.path||'(not saved)')}</code></div>`
+      +`<div class="cfgpath">Copy into <code>${esc(j.install_hint)}</code> and restart HA, `
+      +`then delete and re-add the device in Tuya Local.</div>`
+      +`<pre class="cfgyaml">${esc(j.yaml)}</pre>`
+      +`<div class="dpactions"><button class="cfgbtn" data-copyyaml="1">⧉ Copy YAML</button></div>`;
+    out.classList.remove('hidden');
+    const cy=out.querySelector('[data-copyyaml]');
+    if(cy) cy.onclick=()=>copy(j.yaml,cy);
+    showToast(`Config written: ${j.filename}`);
+  }catch(e){ banner(e.message,'err'); }
+  finally{ btn.disabled=false; btn.textContent=label; }
+}
+
 function dpDetail(r){
   const wrap=document.createElement('div'); wrap.className='dpdetail';
   const dp=r.dp;
@@ -246,12 +271,16 @@ function dpDetail(r){
   const um=Object.keys(dp.unmapped||{});
   if(um.length) html+=`<div class="dpnote">Reported but absent from the spec: `
     +um.map(k=>`${esc(k)}=${esc(String(dp.unmapped[k]))}`).join(', ')+`</div>`;
-  if(ids.length) html+=`<div class="dpnote">`
-    +`<span class="copyable" data-copyjson="${esc(r.id)}">⧉ Copy this device as JSON</span></div>`;
+  if(ids.length) html+=`<div class="dpactions">`
+    +`<button class="cfgbtn" data-gen="${esc(r.id)}">⚙ Create Tuya Local config</button>`
+    +`<span class="copyable" data-copyjson="${esc(r.id)}">⧉ Copy this device as JSON</span></div>`
+    +`<div class="cfgout hidden" id="cfg-${esc(r.id)}"></div>`;
   wrap.innerHTML=html;
   wrap.onclick=ev=>ev.stopPropagation();
   const c=wrap.querySelector('[data-copyjson]');
   if(c) c.onclick=()=>copy(JSON.stringify(dp,null,2),c);
+  const g=wrap.querySelector('[data-gen]');
+  if(g) g.onclick=()=>genConfig(r,g,wrap.querySelector('.cfgout'));
   return wrap;
 }
 
