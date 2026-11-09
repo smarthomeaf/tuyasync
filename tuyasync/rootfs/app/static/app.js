@@ -3,6 +3,7 @@ const API = (p) => `.${p}`;  // ingress serves under a base path; relative keeps
 let STATE = { devices:[], snapshot:[], ha_entries:[], mismatches:[], creds_configured:false };
 let DPS = {};                 // device_id -> DP model + values
 let dpsOpen = {};             // device_id -> expanded in the Data Points tab
+let INSTALLED = {missing:[], generated:[], dir_exists:true};
 let view = 'mismatches';
 let sortKey = null, sortDir = 1, catFilter = 'all';
 const el = id => document.getElementById(id);
@@ -19,6 +20,11 @@ async function loadState(){
   if(!STATE.creds_configured) banner('Cloud credentials not set — add API key/secret/device-id in the add-on Configuration tab to enable Sync.','warn');
   else banner('');
   render();
+}
+
+async function loadInstalled(){
+  try{ const r=await fetch(API('/api/config/installed')); INSTALLED=await r.json(); }
+  catch(e){ INSTALLED={missing:[],generated:[],dir_exists:true}; }
 }
 
 async function loadDps(){
@@ -246,6 +252,48 @@ async function genConfig(r, btn, out){
   finally{ btn.disabled=false; btn.textContent=label; }
 }
 
+// Write the config straight into Tuya Local's devices folder. The add-on keeps
+// its own copy in /share too, because a Tuya Local update replaces that folder
+// wholesale and takes custom configs with it.
+async function installConfig(r, btn, out){
+  btn.disabled=true; const label=btn.textContent; btn.textContent='Installing…';
+  try{
+    const res=await fetch(API('/api/config/install?device_id=')+encodeURIComponent(r.id),
+      {method:'POST'});
+    const j=await res.json();
+    if(!res.ok) throw new Error(j.detail||'install failed');
+    INSTALLED=j.state||INSTALLED;
+    const warn=(j.warnings||[]).map(w=>`<div class="cfgwarn">⚠ ${esc(w)}</div>`).join('');
+    out.innerHTML=warn
+      +`<div class="cfgpath cfgok">✓ ${j.replaced?'Replaced':'Installed'} `
+      +`<code>${esc(j.installed_to)}</code></div>`
+      +`<div class="cfgpath">Now restart Home Assistant, then delete and re-add `
+      +`the device in Tuya Local so it picks up the new config.</div>`
+      +`<pre class="cfgyaml">${esc(j.yaml)}</pre>`
+      +`<div class="dpactions"><button class="cfgbtn" data-copyyaml="1">⧉ Copy YAML</button></div>`;
+    out.classList.remove('hidden');
+    const cy=out.querySelector('[data-copyyaml]');
+    if(cy) cy.onclick=()=>copy(j.yaml,cy);
+    showToast(`Installed ${j.filename}`);
+    render();
+  }catch(e){ banner(e.message,'err'); }
+  finally{ btn.disabled=false; btn.textContent=label; }
+}
+
+async function reinstallAll(btn){
+  btn.disabled=true; btn.textContent='Restoring…';
+  try{
+    const res=await fetch(API('/api/config/reinstall'),{method:'POST'});
+    const j=await res.json();
+    if(!res.ok) throw new Error(j.detail||'restore failed');
+    INSTALLED=j.state||INSTALLED;
+    showToast(`Restored ${j.restored.length} config(s)`);
+    if(j.failed&&j.failed.length) banner(j.failed.join('; '),'err');
+    render();
+  }catch(e){ banner(e.message,'err'); }
+  finally{ btn.disabled=false; }
+}
+
 function dpDetail(r){
   const wrap=document.createElement('div'); wrap.className='dpdetail';
   const dp=r.dp;
@@ -273,6 +321,7 @@ function dpDetail(r){
     +um.map(k=>`${esc(k)}=${esc(String(dp.unmapped[k]))}`).join(', ')+`</div>`;
   if(ids.length) html+=`<div class="dpactions">`
     +`<button class="cfgbtn" data-gen="${esc(r.id)}">⚙ Create Tuya Local config</button>`
+    +`<button class="cfgbtn primary" data-install="${esc(r.id)}">⤓ Install into Tuya Local</button>`
     +`<span class="copyable" data-copyjson="${esc(r.id)}">⧉ Copy this device as JSON</span></div>`
     +`<div class="cfgout hidden" id="cfg-${esc(r.id)}"></div>`;
   wrap.innerHTML=html;
@@ -281,6 +330,8 @@ function dpDetail(r){
   if(c) c.onclick=()=>copy(JSON.stringify(dp,null,2),c);
   const g=wrap.querySelector('[data-gen]');
   if(g) g.onclick=()=>genConfig(r,g,wrap.querySelector('.cfgout'));
+  const inst=wrap.querySelector('[data-install]');
+  if(inst) inst.onclick=()=>installConfig(r,inst,wrap.querySelector('.cfgout'));
   return wrap;
 }
 
@@ -406,6 +457,17 @@ function render(){
     });
     if(!list.length) rows.innerHTML=`<div class="row"><div class="nochange" style="padding:20px">No devices — run Refresh HA and Scan LAN.</div></div>`;
   }else if(view==='dps'){
+    if(INSTALLED.missing && INSTALLED.missing.length){
+      const note=document.createElement('div'); note.className='row';
+      note.innerHTML=`<div class="cfgmissing">⚠ ${INSTALLED.missing.length} generated `
+        +`config(s) are no longer in Tuya Local's devices folder `
+        +`(a Tuya Local update replaces it): `
+        +`<code>${esc(INSTALLED.missing.join(', '))}</code>`
+        +`<button class="cfgbtn" id="reinstallBtn">⤓ Reinstall them</button></div>`;
+      rows.appendChild(note);
+      note.querySelector('#reinstallBtn').onclick=ev=>{ ev.stopPropagation();
+        reinstallAll(ev.target); };
+    }
     let list=dpsRows();
     if(catFilter==='withdps')list=list.filter(r=>r.dp&&Object.keys(r.dp.dps||{}).length);
     else if(catFilter==='unread')list=list.filter(r=>!r.dp);
@@ -469,5 +531,5 @@ function render(){
 }
 
 loadState();
-loadDps().then(render);
+loadDps().then(loadInstalled).then(render);
 initLog();

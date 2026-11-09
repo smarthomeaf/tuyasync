@@ -657,6 +657,26 @@ def _dps_fetch_blocking(devices: list) -> dict:
 # `primary_entity` / `secondary_entities` layout is not what current configs
 # use.)
 CONFIG_DIR = WORKDIR / "tuya_local_custom"
+# Where Tuya Local looks for device configs. Writable because `map:` now asks
+# for homeassistant_config:rw -- HA add-on mounts cannot be scoped to a
+# subfolder, so every write below is confined to this directory by hand.
+TUYA_LOCAL_DEVICES = Path("/homeassistant/custom_components/tuya_local/devices")
+
+
+def _safe_device_path(filename: str) -> Path:
+    """Resolve a generated filename inside Tuya Local's devices folder.
+
+    The add-on can write anywhere under /homeassistant, so refuse anything
+    that isn't a plain *.yaml landing directly in that one directory --
+    a name carrying a path separator must never escape it.
+    """
+    name = os.path.basename(filename or "")
+    if not name.endswith(".yaml") or name != filename or name.startswith("."):
+        raise RuntimeError(f"refusing to write unexpected filename {filename!r}")
+    target = (TUYA_LOCAL_DEVICES / name).resolve()
+    if target.parent != TUYA_LOCAL_DEVICES.resolve():
+        raise RuntimeError("refusing to write outside Tuya Local's devices folder")
+    return target
 
 # code name -> the climate attribute it plays
 _POWER_CODES = {"switch", "power", "switch_1"}
@@ -1102,6 +1122,71 @@ async def config_list():
     except Exception:
         files = []
     return {"dir": str(CONFIG_DIR), "files": files}
+
+
+def _installed_state() -> dict:
+    try:
+        installed = sorted(p.name for p in TUYA_LOCAL_DEVICES.glob("*.yaml"))
+        exists = TUYA_LOCAL_DEVICES.is_dir()
+    except Exception:
+        installed, exists = [], False
+    try:
+        ours = sorted(p.name for p in CONFIG_DIR.glob("*.yaml"))
+    except Exception:
+        ours = []
+    # a Tuya Local update replaces that folder wholesale, so anything we
+    # generated but can no longer see there has been wiped
+    return {"devices_dir": str(TUYA_LOCAL_DEVICES), "dir_exists": exists,
+            "generated": ours,
+            "missing": [n for n in ours if n not in installed]}
+
+
+@app.post("/api/config/install")
+async def config_install(device_id: str):
+    """Generate and write the config straight into Tuya Local's devices folder."""
+    row = STATE["dps"].get(device_id)
+    if not row:
+        raise HTTPException(status_code=404,
+                            detail="No data points for that device yet — run "
+                                   "Read Data Points first.")
+    if not TUYA_LOCAL_DEVICES.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{TUYA_LOCAL_DEVICES} not found — is Tuya Local installed?")
+    try:
+        built = _generate_tuya_local_yaml(row)
+        target = _safe_device_path(built["filename"])
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        # keep our own copy first: a Tuya Local update wipes the devices folder
+        (CONFIG_DIR / built["filename"]).write_text(built["yaml"])
+        existed = target.exists()
+        target.write_text(built["yaml"])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Install failed: {e}")
+    return {**built, "installed_to": str(target), "replaced": existed,
+            "state": _installed_state()}
+
+
+@app.post("/api/config/reinstall")
+async def config_reinstall():
+    """Put every config we've generated back after a Tuya Local update."""
+    if not TUYA_LOCAL_DEVICES.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"{TUYA_LOCAL_DEVICES} not found — is Tuya Local installed?")
+    restored, failed = [], []
+    for src in sorted(CONFIG_DIR.glob("*.yaml")):
+        try:
+            _safe_device_path(src.name).write_text(src.read_text())
+            restored.append(src.name)
+        except Exception as e:
+            failed.append(f"{src.name}: {e}")
+    return {"restored": restored, "failed": failed, "state": _installed_state()}
+
+
+@app.get("/api/config/installed")
+async def config_installed():
+    return _installed_state()
 
 
 @app.get("/api/scan/log")
