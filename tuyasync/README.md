@@ -16,10 +16,36 @@ Scan, sync, and repair Tuya Local devices from a UI in your HA sidebar.
   and **Copy** puts the whole thing on your clipboard.
 - **⌂ Refresh HA** — reads your `tuya_local` config entries and their configured
   `host` (IP).
+- **⛁ Read Data Points** — pulls every device's DP model from the Tuya cloud:
+  each DP's number, code name, type, range or enum, whether it's writable, and
+  its current value. See **Data Points tab** below.
 - **IP Mismatches tab** — diffs each device's *scanned* IP against the IP Home
   Assistant currently has configured, and offers a **per-device one-click Fix**
   that rewrites the entry's host through the Tuya Local options flow. You approve
   each change.
+
+## Data Points tab
+
+A Tuya device speaks in numbered slots — "data points". DP 1 might be the
+power switch, DP 2 a setpoint. The numbers differ per device, which is why
+Tuya Local matches devices by their *DP signature*, and why a device it
+doesn't recognise can't be configured until you know what its DPs are.
+
+**Read Data Points** fetches that for every device at once and shows it per
+device: DP number, code, type, current value, range or enum, and a `write`
+badge on the ones that are settable. Devices whose spec and live status
+disagree get a "reported but absent from the spec" note rather than silently
+dropping the difference. Each device can be copied as JSON for pasting into a
+config or a GitHub issue.
+
+**This reads the cloud, not the LAN, on purpose.** A Tuya device accepts only
+one local connection at a time, and Tuya Local already holds it for every
+device it manages — polling them locally would either fail or knock entities
+offline while it ran. The cloud is also the only source for the code names,
+types and ranges; the local protocol returns bare numbers.
+
+A device that is offline in the Tuya cloud shows its spec with a note that the
+values are unavailable. Cloud credentials are required (Configuration tab).
 
 ## Why the IP fix matters
 

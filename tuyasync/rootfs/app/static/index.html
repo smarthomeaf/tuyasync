@@ -61,6 +61,28 @@
   .row:last-child{border-bottom:none} .row:hover{background:var(--panel-2)}
   .grid-dev{grid-template-columns:1.5fr 1fr 1.9fr .5fr}
   .grid-mm{grid-template-columns:1.3fr .85fr .85fr 1.5fr .55fr .8fr}
+  .grid-dps{grid-template-columns:1.7fr 1.1fr .55fr .9fr}
+
+  /* data points: one row per device, its DP table folded underneath */
+  .expander{cursor:pointer;user-select:none;color:var(--ink-faint);font-size:9px;
+    display:inline-block;width:10px;transition:transform .15s}
+  .row.open .expander{transform:rotate(90deg)}
+  .dpdetail{padding:2px 20px 16px;border-bottom:1px solid var(--line);background:#0b101a}
+  .dpscroll{overflow-x:auto}
+  .dptable{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+  .dptable th{text-align:left;color:var(--ink-dim);font-weight:600;font-size:9px;
+    letter-spacing:.12em;text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--line);
+    white-space:nowrap}
+  .dptable td{padding:5px 10px;border-bottom:1px solid var(--line);color:var(--ink-dim);vertical-align:top}
+  .dptable tr:last-child td{border-bottom:none}
+  .dptable td.dpid{color:var(--amber);font-weight:700;width:46px}
+  .dptable td.dpcode{color:var(--ink)}
+  .dptable td.dpval{color:var(--green);font-weight:600}
+  .dpw{font-size:9px;padding:1px 5px;border-radius:4px;background:var(--cyan-soft);color:var(--cyan)}
+  .dperr{color:var(--red);font-size:12px;padding:8px 0}
+  .dpnote{color:var(--ink-faint);font-size:11px;padding:8px 0 0}
+  .badge.dps{background:var(--cyan-soft);color:var(--cyan)}
+  .badge.nodps{background:var(--amber-soft);color:var(--amber)}
 
   .name{font-weight:600;font-size:14px;display:flex;align-items:center;gap:9px}
   .badge{font-family:var(--mono);font-size:9px;letter-spacing:.1em;padding:2px 6px;border-radius:5px;
@@ -142,7 +164,8 @@
     pointer-events:none;transition:all .2s;font-family:var(--mono)}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .hidden{display:none!important}
-  @media(max-width:760px){.thead{display:none}.grid-dev,.grid-mm{grid-template-columns:1fr;gap:7px}}
+  @media(max-width:760px){.thead{display:none}
+    .grid-dev,.grid-mm,.grid-dps{grid-template-columns:1fr;gap:7px}}
 </style>
 </head>
 <body>
@@ -157,12 +180,13 @@
     <button class="btn primary" id="syncBtn"><span class="spin"></span><span class="lbl">☁ Sync from Cloud</span></button>
     <button class="btn" id="scanBtn"><span class="spin"></span><span class="lbl">⟲ Scan LAN</span></button>
     <button class="btn" id="haBtn"><span class="spin"></span><span class="lbl">⌂ Refresh HA</span></button>
+    <button class="btn" id="dpsBtn"><span class="spin"></span><span class="lbl">⛁ Read Data Points</span></button>
   </div>
 
   <div class="scanlog" id="scanlog">
     <div class="scanlog-head" id="scanlogHead">
       <span class="chev">▶</span>
-      <span class="scanlog-title">Scan log</span>
+      <span class="scanlog-title" id="scanlogTitle">Scan log</span>
       <span class="scanlog-meta" id="scanlogMeta">no scan yet</span>
       <span class="scanlog-dot"></span>
       <span class="scanlog-copy hidden" id="scanlogCopy">Copy</span>
@@ -177,6 +201,7 @@
   <div class="tabs">
     <div class="tab active" data-view="mismatches">IP Mismatches</div>
     <div class="tab" data-view="devices">All Devices</div>
+    <div class="tab" data-view="dps">Data Points</div>
   </div>
 
   <div class="toolbar">
