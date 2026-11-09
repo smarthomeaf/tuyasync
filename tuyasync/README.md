@@ -47,6 +47,39 @@ types and ranges; the local protocol returns bare numbers.
 A device that is offline in the Tuya cloud shows its spec with a note that the
 values are unavailable. Cloud credentials are required (Configuration tab).
 
+## Creating a Tuya Local config for an unrecognised device
+
+Tuya Local matches a device by its **DP signature** — which DP numbers it has
+and of what type. If no bundled config matches, the device only offers generic
+fallbacks (Multi switch, Simple switch), which map entities onto the wrong DPs
+and control nothing properly.
+
+On the **Data Points** tab, expand the device and press
+**⚙ Create Tuya Local config**. The YAML is built from that device's own DPs:
+a boolean power DP plus a setpoint becomes a `climate` entity, a countdown
+enum a timer `select`, a remaining-time integer a duration `sensor`, a fault
+bitmap a problem `binary_sensor`. Fahrenheit is taken from the DP's own unit.
+Every other DP still gets an entity — a config that omits DPs may never match
+the device at all.
+
+The file is written to `/share/tuyasync/tuya_local_custom/`. To install it:
+
+1. Copy it to `/config/custom_components/tuya_local/devices/` (Samba share,
+   File Editor, or the VS Code add-on — this add-on mounts your HA config
+   **read-only** by design and will not write there itself).
+2. Restart Home Assistant.
+3. Delete the device in Tuya Local and re-add it; the new config should now
+   appear in the match list.
+
+**Re-copy it after a Tuya Local update.** The integration replaces its own
+`devices/` folder wholesale when it updates, which deletes custom configs —
+that is why the generated copy lives in `/share` and not only there.
+
+The entity choices are inferred from DP code names, so read the file before
+using it. Once it works, consider sending it upstream to
+[make-all/tuya-local](https://github.com/make-all/tuya-local) — merged configs
+survive updates and need no maintenance.
+
 ## Why the IP fix matters
 
 Tuya Local pins each device to an IP. After a DHCP shuffle, HA keeps polling the
