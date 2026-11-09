@@ -123,6 +123,36 @@ force-scan said about the device:
   usable, just not identified by the scan itself. Raising `scan_seconds` gives
   the handshake more room to complete.
 
+## Permissions this add-on asks for
+
+| Permission | Why |
+|---|---|
+| `host_network: true` | The tinytuya broadcast scan uses UDP 6666/6667/7000, which cannot cross Docker's bridge network onto an IoT VLAN. |
+| `hassio_api`, `homeassistant_api`, `auth_api` | Read `tuya_local` config entries and drive the options flow to fix a device's host or local key. |
+| `map: share:rw` | Working files: `devices.json`, `snapshot.json`, `scanlog.json`, `dps.json`, and generated configs in `tuya_local_custom/`. |
+| `map: homeassistant_config:rw` | **Writes generated device configs into `custom_components/tuya_local/devices/`.** Also reads `.storage/core.config_entries`, which the HA API never exposes. |
+
+### About `homeassistant_config:rw`
+
+This was `:ro` until v1.5.0, when the one-click **Install into Tuya Local**
+button was added. Home Assistant add-on mounts **cannot be scoped to a
+subfolder**, so `rw` grants write access to the whole config directory —
+`.storage`, `configuration.yaml`, automations and all — not just the Tuya
+Local folder. There is no narrower mount available.
+
+The narrowing is therefore done in code. `_safe_device_path()` in `server.py`
+accepts only a plain `*.yaml` filename landing directly in
+`custom_components/tuya_local/devices/`, and refuses anything else: a name
+containing a path separator, an absolute path, a `../` traversal, a dotfile,
+or any extension other than `.yaml`. Nothing is ever deleted — files are only
+written or replaced.
+
+If you would rather not grant this, set the mount back to
+`homeassistant_config:ro` in `config.yaml`. Everything else keeps working and
+**already-installed device configs are unaffected**; you lose only the Install
+and Reinstall buttons, and go back to copying the generated file out of
+`/share/tuyasync/tuya_local_custom/` yourself.
+
 ## Security notes
 
 - Local keys are LAN control credentials. The UI keeps them blurred by default;
