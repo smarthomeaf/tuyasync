@@ -4,6 +4,8 @@ let STATE = { devices:[], snapshot:[], ha_entries:[], mismatches:[], creds_confi
 let DPS = {};                 // device_id -> DP model + values
 let dpsOpen = {};             // device_id -> expanded in the Data Points tab
 let INSTALLED = {missing:[], generated:[], dir_exists:true};
+// last generate/install result per device, so a re-render doesn't wipe it
+let cfgOut = {};
 let view = 'mismatches';
 let sortKey = null, sortDir = 1, catFilter = 'all';
 const el = id => document.getElementById(id);
@@ -230,6 +232,15 @@ function dpRange(v){
 // Build a Tuya Local device config from what we read off the device. The
 // numbers are the device's own, so this is a starting point to review rather
 // than something to trust blindly -- entity choices come from DP code names.
+function paintCfg(id, out){
+  const saved=cfgOut[id];
+  if(!out || !saved) return;
+  out.innerHTML=saved.html;
+  out.classList.remove('hidden');
+  const cy=out.querySelector('[data-copyyaml]');
+  if(cy) cy.onclick=ev=>{ ev.stopPropagation(); copy(saved.yaml,cy); };
+}
+
 async function genConfig(r, btn, out){
   btn.disabled=true; const label=btn.textContent; btn.textContent='Generating…';
   try{
@@ -238,15 +249,13 @@ async function genConfig(r, btn, out){
     const j=await res.json();
     if(!res.ok) throw new Error(j.detail||'generate failed');
     const warn=(j.warnings||[]).map(w=>`<div class="cfgwarn">⚠ ${esc(w)}</div>`).join('');
-    out.innerHTML=warn
+    cfgOut[r.id]={yaml:j.yaml, html: warn
       +`<div class="cfgpath">Saved to <code>${esc(j.path||'(not saved)')}</code></div>`
       +`<div class="cfgpath">Copy into <code>${esc(j.install_hint)}</code> and restart HA, `
       +`then delete and re-add the device in Tuya Local.</div>`
       +`<pre class="cfgyaml">${esc(j.yaml)}</pre>`
-      +`<div class="dpactions"><button class="cfgbtn" data-copyyaml="1">⧉ Copy YAML</button></div>`;
-    out.classList.remove('hidden');
-    const cy=out.querySelector('[data-copyyaml]');
-    if(cy) cy.onclick=()=>copy(j.yaml,cy);
+      +`<div class="dpactions"><button class="cfgbtn" data-copyyaml="1">⧉ Copy YAML</button></div>`};
+    paintCfg(r.id, out);
     showToast(`Config written: ${j.filename}`);
   }catch(e){ banner(e.message,'err'); }
   finally{ btn.disabled=false; btn.textContent=label; }
@@ -264,18 +273,15 @@ async function installConfig(r, btn, out){
     if(!res.ok) throw new Error(j.detail||'install failed');
     INSTALLED=j.state||INSTALLED;
     const warn=(j.warnings||[]).map(w=>`<div class="cfgwarn">⚠ ${esc(w)}</div>`).join('');
-    out.innerHTML=warn
+    cfgOut[r.id]={yaml:j.yaml, html: warn
       +`<div class="cfgpath cfgok">✓ ${j.replaced?'Replaced':'Installed'} `
       +`<code>${esc(j.installed_to)}</code></div>`
       +`<div class="cfgpath">Now restart Home Assistant, then delete and re-add `
       +`the device in Tuya Local so it picks up the new config.</div>`
       +`<pre class="cfgyaml">${esc(j.yaml)}</pre>`
-      +`<div class="dpactions"><button class="cfgbtn" data-copyyaml="1">⧉ Copy YAML</button></div>`;
-    out.classList.remove('hidden');
-    const cy=out.querySelector('[data-copyyaml]');
-    if(cy) cy.onclick=()=>copy(j.yaml,cy);
+      +`<div class="dpactions"><button class="cfgbtn" data-copyyaml="1">⧉ Copy YAML</button></div>`};
     showToast(`Installed ${j.filename}`);
-    render();
+    render();   // refreshes the missing-config notice; paintCfg restores this panel
   }catch(e){ banner(e.message,'err'); }
   finally{ btn.disabled=false; btn.textContent=label; }
 }
@@ -332,6 +338,7 @@ function dpDetail(r){
   if(g) g.onclick=()=>genConfig(r,g,wrap.querySelector('.cfgout'));
   const inst=wrap.querySelector('[data-install]');
   if(inst) inst.onclick=()=>installConfig(r,inst,wrap.querySelector('.cfgout'));
+  paintCfg(r.id, wrap.querySelector('.cfgout'));
   return wrap;
 }
 
