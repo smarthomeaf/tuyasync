@@ -81,6 +81,19 @@
   .dpw{font-size:9px;padding:1px 5px;border-radius:4px;background:var(--cyan-soft);color:var(--cyan)}
   .dperr{color:var(--red);font-size:12px;padding:8px 0}
   .dpnote{color:var(--ink-faint);font-size:11px;padding:8px 0 0}
+  .dpactions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 0 0}
+  .cfgbtn{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);
+    border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;
+    font-family:var(--sans)}
+  .cfgbtn:hover:not(:disabled){border-color:var(--amber);color:var(--amber)}
+  .cfgbtn:disabled{opacity:.5;cursor:default}
+  .cfgout{padding:10px 0 0}
+  .cfgwarn{color:var(--amber);font-size:12px;padding:3px 0}
+  .cfgpath{color:var(--ink-dim);font-size:11.5px;padding:3px 0}
+  .cfgpath code{font-family:var(--mono);color:var(--cyan)}
+  .cfgyaml{background:#070b12;border:1px solid var(--line);border-radius:8px;padding:12px 14px;
+    font-family:var(--mono);font-size:11.5px;line-height:1.55;color:var(--ink-dim);
+    max-height:380px;overflow:auto;white-space:pre;margin-top:8px}
   .badge.dps{background:var(--cyan-soft);color:var(--cyan)}
   .badge.nodps{background:var(--amber-soft);color:var(--amber)}
 

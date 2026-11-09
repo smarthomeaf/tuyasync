@@ -647,6 +647,249 @@ def _dps_fetch_blocking(devices: list) -> dict:
     return out
 
 
+# ----------------------- Tuya Local config generator --------------------------
+# Tuya Local matches a device by its DP *signature*, so a generated config has
+# to account for every DP the device reports -- including ones we don't model
+# as anything interesting. A config that omits DPs may simply never match.
+#
+# Schema follows the current devices/README.md in make-all/tuya-local: a
+# top-level `name`, a `products` list, and an `entities` LIST. (The older
+# `primary_entity` / `secondary_entities` layout is not what current configs
+# use.)
+CONFIG_DIR = WORKDIR / "tuya_local_custom"
+
+# code name -> the climate attribute it plays
+_POWER_CODES = {"switch", "power", "switch_1"}
+_SETPOINT_CODES = ("temp_set", "settemp", "target_temp")
+_CURRENT_CODES = ("temp_current", "va_temperature", "upper_temp", "temp_indoor")
+_HUMIDITY_CODES = ("humidity_value", "va_humidity")
+
+
+def _slug(text: str) -> str:
+    out = "".join(c.lower() if c.isalnum() else "_" for c in (text or ""))
+    while "__" in out:
+        out = out.replace("__", "_")
+    return out.strip("_") or "device"
+
+
+def _is_f(dp: dict) -> bool:
+    unit = str((dp.get("values") or {}).get("unit") or "")
+    return "F" in unit.upper() or "\u2109" in unit or unit.strip() in ("\u2109", "F")
+
+
+def _yaml_str(v) -> str:
+    """Quote only where YAML needs it, to match the style of bundled configs."""
+    s = str(v)
+    if s in ("", "on", "off", "yes", "no", "true", "false", "null", "~"):
+        return f'"{s}"'
+    if s[:1].isdigit() or any(c in s for c in ":#{}[],&*?|-<>=!%@`'" + '"'):
+        return '"' + s.replace('"', '\\"') + '"'
+    return s
+
+
+def _classify(dps: dict) -> dict:
+    """Sort a device's DPs into the roles a Tuya Local config cares about."""
+    roles = {"power": None, "setpoint": None, "current": None, "mode": None,
+             "lock": None, "fault": None, "countdown": None, "countdown_left": None,
+             "humidity": None, "rest": []}
+    for dp_id, dp in sorted(dps.items(), key=lambda kv: int(kv[0])):
+        code = (dp.get("code") or "").lower()
+        typ = (dp.get("type") or "").lower()
+        hit = None
+        if code in _POWER_CODES and typ == "boolean":
+            hit = "power"
+        elif code.startswith(_SETPOINT_CODES):
+            hit = "setpoint"
+        elif code.startswith(_CURRENT_CODES):
+            hit = "current"
+        elif code == "mode":
+            hit = "mode"
+        elif code in ("child_lock", "lock"):
+            hit = "lock"
+        elif code == "fault":
+            hit = "fault"
+        elif code in ("countdown", "countdown_set", "timer"):
+            hit = "countdown"
+        elif code in ("countdown_left", "remain_time", "time_remaining"):
+            hit = "countdown_left"
+        elif code.startswith(_HUMIDITY_CODES):
+            hit = "humidity"
+        if hit and roles[hit] is None:
+            roles[hit] = (dp_id, dp)
+        else:
+            roles["rest"].append((dp_id, dp))
+    return roles
+
+def _dp_block(dp_id, dp, name, indent="        ", **extra) -> list:
+    """One `- id: N / name: x / type: y` stanza, plus whatever extras apply."""
+    typ = (dp.get("type") or "").lower()
+    ha_type = {"boolean": "boolean", "integer": "integer", "enum": "string",
+               "string": "string", "json": "string", "bitmap": "bitfield",
+               "raw": "string"}.get(typ, "string")
+    out = [f"{indent}- id: {dp_id}",
+           f"{indent}  name: {name}",
+           f"{indent}  type: {extra.pop('type_override', ha_type)}"]
+    for key in ("class", "unit", "optional", "readonly", "persist"):
+        if key in extra:
+            out.append(f"{indent}  {key}: {extra.pop(key)}")
+    rng = extra.pop("range", None)
+    if rng:
+        out += [f"{indent}  range:",
+                f"{indent}    min: {rng[0]}", f"{indent}    max: {rng[1]}"]
+    mapping = extra.pop("mapping", None)
+    if mapping:
+        out.append(f"{indent}  mapping:")
+        for dps_val, value in mapping:
+            out.append(f"{indent}    - dps_val: {dps_val}")
+            out.append(f"{indent}      value: {value}")
+    return out
+
+
+def _enum_mapping(dp) -> list:
+    return [(_yaml_str(v), _yaml_str(v))
+            for v in ((dp.get("values") or {}).get("range") or [])]
+
+
+def _rng(dp):
+    v = dp.get("values") or {}
+    if v.get("min") is None and v.get("max") is None:
+        return None
+    return (v.get("min", 0), v.get("max", 0))
+
+
+def _fallback_entity(dp_id, dp) -> list:
+    """Any DP we have no special meaning for still has to appear, or the
+    device may not match this config at all."""
+    typ = (dp.get("type") or "").lower()
+    code = dp.get("code") or f"dp_{dp_id}"
+    writable = dp.get("writable")
+    name = _slug(code)
+    if typ == "boolean":
+        ent, attr = ("switch", "switch") if writable else ("binary_sensor", "sensor")
+    elif typ == "enum":
+        ent, attr = ("select", "option") if writable else ("sensor", "sensor")
+    elif typ == "integer":
+        ent, attr = ("number", "value") if writable else ("sensor", "sensor")
+    else:
+        ent, attr = ("sensor", "sensor")
+    lines = [f"  - entity: {ent}",
+             f"    name: {_yaml_str(code)}",
+             f"    category: diagnostic" if not writable else "    category: config"]
+    extra = {"optional": "true"}
+    if typ == "integer":
+        rng = _rng(dp)
+        if rng:
+            extra["range"] = rng
+        unit = (dp.get("values") or {}).get("unit")
+        if unit and not _is_f(dp):
+            extra["unit"] = _yaml_str(unit)
+    if typ == "enum":
+        extra["mapping"] = _enum_mapping(dp)
+    lines.append("    dps:")
+    lines += _dp_block(dp_id, dp, attr, indent="      ", **extra)
+    return lines
+
+
+def _generate_tuya_local_yaml(row: dict) -> dict:
+    """Build a Tuya Local device config from a device's DP model."""
+    dps = row.get("dps") or {}
+    if not dps:
+        raise RuntimeError("No data points for this device — run Read Data "
+                           "Points first.")
+    r = _classify(dps)
+    warnings, used = [], set()
+    name = row.get("name") or "Device"
+
+    head = [f"# Generated by TuyaSync from {name}'s live data points.",
+            f"# Device: {row.get('id','')}   category: {row.get('category','')}",
+            "# Review before use: entity choices are inferred from DP code names.",
+            f"name: {_yaml_str(name)}",
+            "products:",
+            f"  - id: {_yaml_str(row.get('product_id') or 'UNKNOWN')}"]
+    if not row.get("product_id"):
+        warnings.append("No product_id — Tuya Local needs one to match. "
+                        "Run Sync from Cloud, then re-read data points.")
+    head.append("entities:")
+
+    body = []
+    # ---- primary entity -----------------------------------------------------
+    if r["setpoint"] and r["power"]:
+        p_id, p_dp = r["power"]; s_id, s_dp = r["setpoint"]
+        used |= {p_id, s_id}
+        body += ["  - entity: climate", "    translation_only_key: heater", "    dps:"]
+        body += _dp_block(p_id, p_dp, "hvac_mode", indent="      ",
+                          mapping=[("true", '"heat"'), ("false", '"off"')])
+        extra = {}
+        rng = _rng(s_dp)
+        if rng:
+            extra["range"] = rng
+        if _is_f(s_dp):
+            extra["unit"] = "F"
+        body += _dp_block(s_id, s_dp, "temperature", indent="      ", **extra)
+        if r["current"]:
+            c_id, c_dp = r["current"]; used.add(c_id)
+            cx = {"unit": "F"} if _is_f(c_dp) else {}
+            body += _dp_block(c_id, c_dp, "current_temperature", indent="      ", **cx)
+        else:
+            warnings.append("No current-temperature DP found; the climate "
+                            "entity will show no room temperature.")
+        if r["mode"]:
+            m_id, m_dp = r["mode"]; used.add(m_id)
+            body += _dp_block(m_id, m_dp, "preset_mode", indent="      ",
+                              type_override="string", mapping=_enum_mapping(m_dp))
+    elif r["power"]:
+        p_id, p_dp = r["power"]; used.add(p_id)
+        body += ["  - entity: switch", "    dps:"]
+        body += _dp_block(p_id, p_dp, "switch", indent="      ")
+        warnings.append("No setpoint DP, so this was built as a switch rather "
+                        "than a climate entity.")
+    else:
+        warnings.append("No power DP found — no primary entity could be "
+                        "inferred. Review the generated entities by hand.")
+
+    # ---- the well-known extras ---------------------------------------------
+    if r["countdown"]:
+        c_id, c_dp = r["countdown"]; used.add(c_id)
+        body += ["  - entity: select", "    translation_key: timer",
+                 "    category: config", "    dps:"]
+        body += _dp_block(c_id, c_dp, "option", indent="      ",
+                          type_override="string", optional="true",
+                          mapping=_enum_mapping(c_dp))
+    if r["countdown_left"]:
+        c_id, c_dp = r["countdown_left"]; used.add(c_id)
+        unit = (c_dp.get("values") or {}).get("unit") or "min"
+        body += ["  - entity: sensor", "    translation_key: time_remaining",
+                 "    class: duration", "    category: diagnostic", "    dps:"]
+        body += _dp_block(c_id, c_dp, "sensor", indent="      ", unit=_yaml_str(unit))
+    if r["lock"]:
+        l_id, l_dp = r["lock"]; used.add(l_id)
+        body += ["  - entity: lock", "    translation_key: child_lock",
+                 "    category: config", "    dps:"]
+        body += _dp_block(l_id, l_dp, "lock", indent="      ")
+    if r["fault"]:
+        f_id, f_dp = r["fault"]; used.add(f_id)
+        body += ["  - entity: binary_sensor", "    class: problem",
+                 "    category: diagnostic", "    dps:"]
+        # any non-zero bit is a fault; the README documents `bitfield` for this
+        body += _dp_block(f_id, f_dp, "sensor", indent="      ",
+                          type_override="bitfield")
+        body += ["        mapping:",
+                 "          - dps_val: 0",
+                 "            value: false",
+                 "          - value: true"]
+
+    # ---- everything else, so the DP signature still matches ------------------
+    for dp_id, dp in r["rest"]:
+        if dp_id in used:
+            continue
+        body += _fallback_entity(dp_id, dp)
+
+    yaml_text = "\n".join(head + body) + "\n"
+    return {"yaml": yaml_text,
+            "filename": f"{_slug(name)}.yaml",
+            "warnings": warnings}
+
+
 # ----------------------------- API routes ------------------------------------
 class FixRequest(BaseModel):
     entry_id: str
@@ -822,6 +1065,43 @@ async def dps_fetch(device_id: str = ""):
 @app.get("/api/dps")
 async def dps_get():
     return {"dps": STATE["dps"], "last_dps": STATE["last_dps"]}
+
+
+@app.post("/api/config/generate")
+async def config_generate(device_id: str):
+    """Build a Tuya Local device config from a device's DP model and save it."""
+    row = STATE["dps"].get(device_id)
+    if not row:
+        raise HTTPException(status_code=404,
+                            detail="No data points for that device yet — run "
+                                   "Read Data Points first.")
+    try:
+        built = _generate_tuya_local_yaml(row)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # /share is writable; /homeassistant is mounted read-only on purpose, so
+    # the file lands here and is copied into Tuya Local deliberately
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        path = CONFIG_DIR / built["filename"]
+        path.write_text(built["yaml"])
+        saved = str(path)
+    except Exception as e:
+        saved = ""
+        built["warnings"].append(f"Could not save to /share: {e}")
+    return {**built, "path": saved,
+            "install_hint": "custom_components/tuya_local/devices/"
+                            + built["filename"]}
+
+
+@app.get("/api/config/list")
+async def config_list():
+    """What we've generated so far, so it survives a Tuya Local update."""
+    try:
+        files = sorted(p.name for p in CONFIG_DIR.glob("*.yaml"))
+    except Exception:
+        files = []
+    return {"dir": str(CONFIG_DIR), "files": files}
 
 
 @app.get("/api/scan/log")
