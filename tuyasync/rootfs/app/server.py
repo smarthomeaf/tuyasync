@@ -55,6 +55,7 @@ WORKDIR.mkdir(parents=True, exist_ok=True)
 DEVICES_JSON = WORKDIR / "devices.json"
 SNAPSHOT_JSON = WORKDIR / "snapshot.json"
 SCANLOG_JSON = WORKDIR / "scanlog.json"
+DPS_JSON = WORKDIR / "dps.json"
 
 app = FastAPI(title="TuyaSync")
 
@@ -63,8 +64,10 @@ STATE: dict = {
     "devices": [],      # from cloud sync (devices.json)
     "snapshot": [],     # from LAN scan (snapshot.json)
     "ha_entries": [],   # tuya_local config entries
+    "dps": {},          # device_id -> DP model + values (dps.json)
     "last_scan": None,
     "last_sync": None,
+    "last_dps": None,
     "version": "",      # add-on version, from Supervisor at startup
 }
 
@@ -77,7 +80,8 @@ STATE: dict = {
 SCAN_LOG_MAX = 2000
 
 SCAN_LOG: dict = {
-    "run_id": 0,        # bumped per scan so the UI can tell runs apart
+    "job": "scan",      # which long job produced these lines
+    "run_id": 0,        # bumped per run so the UI can tell runs apart
     "seq": 0,           # monotonic line counter; the UI polls with ?since=
     "running": False,
     "started": None,
@@ -86,7 +90,9 @@ SCAN_LOG: dict = {
 }
 
 _log_lock = threading.Lock()
-_scan_lock = threading.Lock()   # one scan at a time (stdout capture is global)
+# One long job at a time. A LAN scan captures stdout process-wide, and a DP
+# sweep hammers the same devices over the cloud — neither wants company.
+_scan_lock = threading.Lock()
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
@@ -130,8 +136,9 @@ class _LogWriter(io.TextIOBase):
             self._buf = ""
 
 
-def _scan_log_begin() -> None:
+def _scan_log_begin(job: str = "scan") -> None:
     with _log_lock:
+        SCAN_LOG["job"] = job
         SCAN_LOG["run_id"] += 1
         SCAN_LOG["seq"] = 0
         SCAN_LOG["lines"] = []
@@ -145,7 +152,7 @@ def _scan_log_end() -> None:
         SCAN_LOG["running"] = False
         SCAN_LOG["finished"] = time.time()
         snap = {k: SCAN_LOG[k] for k in
-                ("run_id", "seq", "started", "finished", "lines")}
+                ("job", "run_id", "seq", "started", "finished", "lines")}
     # persist so the last run is still readable after an add-on restart
     try:
         SCANLOG_JSON.write_text(json.dumps(snap))
@@ -162,6 +169,9 @@ def _norm_cloud(dev: dict) -> dict:
         "key": dev.get("key") or "",
         "ver": str(dev.get("version") or dev.get("ver") or ""),
         "sub": bool(dev.get("sub", False)),
+        # needed verbatim by a Tuya Local custom config's `products: - id:`
+        "product_id": dev.get("product_id") or dev.get("productKey") or "",
+        "category": dev.get("category") or "",
     }
 
 
@@ -191,11 +201,21 @@ def _load_cached_files() -> None:
             STATE["snapshot"] = [_norm_scan(d) for d in arr]
         except Exception:
             pass
+    if DPS_JSON.exists():
+        try:
+            raw = json.loads(DPS_JSON.read_text())
+            if isinstance(raw, dict):
+                STATE["dps"] = raw
+                STATE["last_dps"] = max(
+                    (d.get("fetched") or 0) for d in raw.values()) if raw else None
+        except Exception:
+            pass
     if SCANLOG_JSON.exists():
         try:
             raw = json.loads(SCANLOG_JSON.read_text())
             SCAN_LOG.update({k: raw[k] for k in
-                             ("run_id", "seq", "started", "finished", "lines")
+                             ("job", "run_id", "seq", "started", "finished",
+                              "lines")
                              if k in raw})
         except Exception:
             pass
@@ -510,6 +530,123 @@ def _build_mismatches() -> list:
     return rows
 
 
+# ----------------------------- data points -----------------------------------
+# A device's DPs ("data points") are the numbered slots it actually speaks:
+# 1 = switch, 2 = setpoint, and so on. The numbers differ per device, which is
+# why Tuya Local matches on the DP signature and why an unrecognised device
+# can't be configured without reading them off the device first.
+#
+# These come from the CLOUD, not the LAN, and deliberately so: a Tuya device
+# accepts a single local connection at a time and Tuya Local already holds it.
+# Polling 60-odd devices locally would either fail or drop entities while it
+# ran. The cloud also hands back the data model -- code names, types, ranges --
+# which the LAN protocol never exposes.
+def _cloud_err(resp) -> str:
+    if not isinstance(resp, dict):
+        return f"unexpected response: {str(resp)[:120]}"
+    return str(resp.get("msg") or resp.get("Error") or "unknown cloud error")
+
+
+def _parse_values(raw):
+    """Tuya returns a DP's range/enum as a JSON *string*; unwrap it."""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _dps_for_device(cloud, dev: dict) -> dict:
+    """DP model + current values for one device. Never raises."""
+    out = {
+        "id": dev.get("id", ""),
+        "name": dev.get("name") or "(unnamed)",
+        "product_id": dev.get("product_id", ""),
+        "category": dev.get("category", ""),
+        "dps": {},        # dp number (as str) -> {code, type, values, writable}
+        "values": {},     # dp number (as str) -> current value
+        "unmapped": {},   # code -> value, where the spec gave us no dp number
+        "error": "",
+        "fetched": time.time(),
+    }
+    spec = cloud.getdps(out["id"])
+    if not (isinstance(spec, dict) and spec.get("success")):
+        out["error"] = _cloud_err(spec)
+        return out
+    result = spec.get("result") or {}
+    # `functions` are writable, `status` is everything readable; a DP can be in
+    # both, so fold status in first and let functions mark what's writable.
+    for key, writable in (("status", False), ("functions", True)):
+        for item in result.get(key) or []:
+            dp_id = item.get("dp_id")
+            if dp_id is None:
+                continue
+            slot = out["dps"].setdefault(str(dp_id), {})
+            slot.update({
+                "code": item.get("code") or slot.get("code") or "",
+                "type": item.get("type") or slot.get("type") or "",
+                "values": _parse_values(item.get("values")) or slot.get("values") or {},
+            })
+            slot["writable"] = slot.get("writable", False) or writable
+    if result.get("category"):
+        out["category"] = result["category"]
+
+    # current values come back keyed by code, so map them onto the DP numbers
+    status = cloud.getstatus(out["id"])
+    if isinstance(status, dict) and status.get("success"):
+        by_code = {str(dp["code"]): dp.get("value")
+                   for dp in (status.get("result") or []) if dp.get("code")}
+        code_to_dp = {v["code"]: k for k, v in out["dps"].items() if v.get("code")}
+        for code, val in by_code.items():
+            dp_id = code_to_dp.get(code)
+            if dp_id:
+                out["values"][dp_id] = val
+            else:
+                # reported but not in the spec -- worth seeing, not worth hiding
+                out["unmapped"][code] = val
+    elif not out["error"]:
+        out["error"] = "values unavailable: " + _cloud_err(status)
+    return out
+
+
+def _dps_fetch_blocking(devices: list) -> dict:
+    """Walk the device list over the cloud. Runs in a thread."""
+    if not (API_KEY and API_SECRET and API_DEVICE_ID):
+        raise RuntimeError(
+            "Cloud credentials not set. Add api_key, api_secret and "
+            "api_device_id in the add-on Configuration tab."
+        )
+    _log(f"Reading data points for {len(devices)} device(s) from the Tuya cloud")
+    _log("(cloud, not LAN: Tuya Local holds the one local connection each "
+         "device allows)")
+    cloud = tinytuya.Cloud(
+        apiRegion=API_REGION, apiKey=API_KEY,
+        apiSecret=API_SECRET, apiDeviceID=API_DEVICE_ID,
+    )
+    out, failed = {}, 0
+    for i, dev in enumerate(devices, 1):
+        if not dev.get("id"):
+            continue
+        row = _dps_for_device(cloud, dev)
+        out[row["id"]] = row
+        if row["error"]:
+            failed += 1
+            _log(f"[{i}/{len(devices)}] {row['name']}: {row['error']}")
+        else:
+            _log(f"[{i}/{len(devices)}] {row['name']}: {len(row['dps'])} DPs"
+                 + (f", {len(row['unmapped'])} unmapped" if row["unmapped"] else ""))
+        # the cloud API is rate limited; a brief pause keeps a 60+ device
+        # sweep from tripping it
+        time.sleep(0.12)
+    _log(f"Data points complete — {len(out) - failed} ok, {failed} failed")
+    DPS_JSON.write_text(json.dumps(out, indent=2))
+    return out
+
+
 # ----------------------------- API routes ------------------------------------
 class FixRequest(BaseModel):
     entry_id: str
@@ -582,6 +719,8 @@ async def get_state():
         "version": STATE["version"],
         "creds_configured": bool(API_KEY and API_SECRET and API_DEVICE_ID),
         "scan_running": SCAN_LOG["running"],
+        "last_dps": STATE["last_dps"],
+        "dps_devices": len(STATE["dps"]),
         "scan_time": SCAN_TIME,
     }
 
@@ -616,7 +755,7 @@ async def lan_scan():
     try:
         # the IPs HA expects each device at — anything silent gets probed directly
         want_ips = sorted({e["host"] for e in STATE["ha_entries"] if e.get("host")})
-        _scan_log_begin()
+        _scan_log_begin("scan")
     except BaseException:
         # nothing has started yet, so this request still owns the lock — if we
         # let it escape held, every later scan answers 409 until a restart
@@ -636,12 +775,62 @@ async def lan_scan():
     return {"count": len(snapshot), "snapshot": snapshot}
 
 
+def _dps_job(devices: list) -> dict:
+    """Owns the job lock for exactly as long as the sweep actually runs."""
+    try:
+        return _dps_fetch_blocking(devices)
+    except Exception as e:
+        _log(f"ERROR: {e}")
+        raise
+    finally:
+        _scan_log_end()
+        _scan_lock.release()
+
+
+@app.post("/api/dps")
+async def dps_fetch(device_id: str = ""):
+    """Pull the DP model + current values. One device with ?device_id=, else all."""
+    devices = STATE["devices"]
+    if device_id:
+        devices = [d for d in devices if d.get("id") == device_id]
+        if not devices:
+            raise HTTPException(status_code=404,
+                                detail=f"No cloud device with id {device_id}. "
+                                       "Run Sync from Cloud first.")
+    if not devices:
+        raise HTTPException(status_code=400,
+                            detail="No devices known yet — run Sync from Cloud first.")
+    if not _scan_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409,
+                            detail="A scan or data-point sweep is already running.")
+    try:
+        _scan_log_begin("dps")
+    except BaseException:
+        _scan_lock.release()
+        raise
+    try:
+        fetched = await asyncio.to_thread(_dps_job, devices)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # a single-device refresh must not wipe the rest of the model
+    STATE["dps"] = {**STATE["dps"], **fetched}
+    STATE["last_dps"] = time.time()
+    return {"count": len(fetched),
+            "failed": sum(1 for d in fetched.values() if d["error"])}
+
+
+@app.get("/api/dps")
+async def dps_get():
+    return {"dps": STATE["dps"], "last_dps": STATE["last_dps"]}
+
+
 @app.get("/api/scan/log")
 async def scan_log(since: int = 0):
     """Lines newer than `since`. Polled while a scan runs; also serves the
     last completed run so a missed scan can still be read back."""
     with _log_lock:
         return {
+            "job": SCAN_LOG.get("job", "scan"),
             "run_id": SCAN_LOG["run_id"],
             "seq": SCAN_LOG["seq"],
             "running": SCAN_LOG["running"],
