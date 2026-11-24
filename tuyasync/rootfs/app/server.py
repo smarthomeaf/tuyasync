@@ -317,6 +317,8 @@ def _read_entry_config() -> dict:
             "protocol_version": str(merged.get("protocol_version", "")),
             "poll_only": bool(merged.get("poll_only", False)),
             "device_id": merged.get("device_id", ""),
+            # the device config Tuya Local loads: devices/<type>.yaml
+            "config_type": str(merged.get("type", "") or ""),
         }
     return out
 
@@ -351,6 +353,7 @@ async def _ha_get_tuya_entries() -> list:
             "protocol_version": c.get("protocol_version", ""),
             "poll_only": c.get("poll_only", False),
             "device_id": c.get("device_id", ""),
+            "config_type": c.get("config_type", ""),
         })
     return out
 
@@ -910,6 +913,116 @@ def _generate_tuya_local_yaml(row: dict) -> dict:
             "warnings": warnings}
 
 
+# --------------------------- configured vs discovered -------------------------
+# The cloud tells us every DP a device has. The Tuya Local config it was
+# matched to (stored in the entry as data["type"] -> devices/<type>.yaml) says
+# which of those DPs actually become something in Home Assistant. The gap
+# between the two is the point: a DP the device reports but no entity maps is
+# a feature HA can't see or control.
+try:
+    import yaml as _yaml
+except Exception:          # the add-on still runs; coverage just reports why not
+    _yaml = None
+
+_CFG_CACHE: dict = {}      # config_type -> (mtime, parsed summary)
+
+
+def _config_summary(config_type: str) -> dict:
+    """Parse devices/<config_type>.yaml into {dp id -> what it becomes}."""
+    out = {"found": False, "name": "", "products": [], "dps": {}, "error": ""}
+    if not config_type:
+        out["error"] = "entry records no config type"
+        return out
+    path = TUYA_LOCAL_DEVICES / f"{config_type}.yaml"
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        out["error"] = f"{path.name} not found in Tuya Local's devices folder"
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+    hit = _CFG_CACHE.get(config_type)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    if _yaml is None:
+        out["error"] = "PyYAML unavailable in this build"
+        return out
+    try:
+        doc = _yaml.safe_load(path.read_text()) or {}
+    except Exception as e:
+        out["error"] = f"could not parse {path.name}: {e}"
+        return out
+    out["found"] = True
+    out["name"] = str(doc.get("name") or "")
+    out["products"] = [str(p.get("id")) for p in (doc.get("products") or [])
+                       if isinstance(p, dict) and p.get("id")]
+    for ent in doc.get("entities") or []:
+        if not isinstance(ent, dict):
+            continue
+        kind = ent.get("entity") or "?"
+        tag = ent.get("translation_key") or ent.get("translation_only_key") \
+            or ent.get("name") or ent.get("class") or ""
+        for dp in ent.get("dps") or []:
+            if not isinstance(dp, dict) or dp.get("id") is None:
+                continue
+            label = f"{kind} · {dp.get('name') or '?'}"
+            if tag:
+                label += f" ({tag})"
+            # one DP can feed several entities; keep them all
+            key = str(dp["id"])
+            out["dps"][key] = (out["dps"][key] + "; " + label) if key in out["dps"] else label
+    _CFG_CACHE[config_type] = (mtime, out)
+    return out
+
+
+def _coverage() -> dict:
+    """device_id -> how much of what the device reports its HA config maps."""
+    cloud_by_name = {d.get("name"): d.get("id") for d in STATE["devices"]}
+    entry_for = {}
+    for e in STATE["ha_entries"]:
+        dev_id = e.get("device_id") or ""
+        # some entries carry a junk device_id (seen: the title itself), so
+        # fall back to matching the cloud name, as the IP view already does
+        if dev_id not in STATE["dps"]:
+            dev_id = cloud_by_name.get(e.get("title"), dev_id)
+        entry_for.setdefault(dev_id, e)
+
+    out = {}
+    for dev_id, row in STATE["dps"].items():
+        reported = set((row.get("dps") or {}).keys())
+        e = entry_for.get(dev_id)
+        if not e:
+            out[dev_id] = {"status": "not_in_ha", "missing": [], "extra": [],
+                           "configured": {}}
+            continue
+        cfg = _config_summary(e.get("config_type", ""))
+        info = {"entry_title": e.get("title", ""),
+                "config_type": e.get("config_type", ""),
+                "config_name": cfg["name"], "configured": cfg["dps"],
+                "error": cfg["error"], "missing": [], "extra": []}
+        if not cfg["found"]:
+            info["status"] = "config_unreadable"
+            out[dev_id] = info
+            continue
+        mapped = set(cfg["dps"].keys())
+        info["missing"] = sorted(reported - mapped, key=int)
+        info["extra"] = sorted(mapped - reported, key=lambda x: int(x) if x.isdigit() else 0)
+        # How the config matched this device. Listing the product id means it
+        # was written for this model; otherwise it only fits the DP signature,
+        # and a config with no products at all is a generic fallback.
+        pid = row.get("product_id") or ""
+        if not cfg["products"]:
+            info["match"] = "generic"
+        elif pid and pid in cfg["products"]:
+            info["match"] = "product"
+        else:
+            info["match"] = "signature"
+        info["status"] = "gaps" if info["missing"] else "complete"
+        out[dev_id] = info
+    return out
+
+
 # ----------------------------- API routes ------------------------------------
 class FixRequest(BaseModel):
     entry_id: str
@@ -1084,7 +1197,8 @@ async def dps_fetch(device_id: str = ""):
 
 @app.get("/api/dps")
 async def dps_get():
-    return {"dps": STATE["dps"], "last_dps": STATE["last_dps"]}
+    return {"dps": STATE["dps"], "last_dps": STATE["last_dps"],
+            "coverage": _coverage()}
 
 
 @app.post("/api/config/generate")

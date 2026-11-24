@@ -2,6 +2,7 @@
 const API = (p) => `.${p}`;  // ingress serves under a base path; relative keeps it working
 let STATE = { devices:[], snapshot:[], ha_entries:[], mismatches:[], creds_configured:false };
 let DPS = {};                 // device_id -> DP model + values
+let COV = {};                 // device_id -> what its Tuya Local config maps
 let dpsOpen = {};             // device_id -> expanded in the Data Points tab
 let INSTALLED = {missing:[], generated:[], dir_exists:true};
 // last generate/install result per device, so a re-render doesn't wipe it
@@ -30,8 +31,9 @@ async function loadInstalled(){
 }
 
 async function loadDps(){
-  try{ const r = await fetch(API('/api/dps')); const j = await r.json(); DPS = j.dps || {}; }
-  catch(e){ DPS = {}; }
+  try{ const r = await fetch(API('/api/dps')); const j = await r.json();
+       DPS = j.dps || {}; COV = j.coverage || {}; }
+  catch(e){ DPS = {}; COV = {}; }
 }
 
 // pick up the last run on load, and latch on to a scan another tab started
@@ -212,7 +214,26 @@ async function fixOne(m, btn){
 // One row per cloud device, its DP table folded underneath.
 function dpsRows(){
   return (STATE.devices||[]).map(d=>({
-    id:d.id, name:d.name||'(unnamed)', product_id:d.product_id||'', dp:DPS[d.id]||null }));
+    id:d.id, name:d.name||'(unnamed)', product_id:d.product_id||'', dp:DPS[d.id]||null,
+    cov:COV[d.id]||null }));
+}
+
+// How much of what the device reports its Tuya Local config turns into HA
+// entities. `missing` DPs are things the device can do that HA can't see.
+function covCell(r){
+  const c=r.cov, n=r.dp?Object.keys(r.dp.dps||{}).length:0;
+  if(!r.dp||r.dp.error&&!n) return '<span class="empty">—</span>';
+  if(!c) return '<span class="empty">—</span>';
+  if(c.status==='not_in_ha') return '<span class="badge none">not in HA</span>';
+  if(c.status==='config_unreadable')
+    return `<span class="badge cfgbad" title="${esc(c.error||'')}">config missing</span>`
+      +`<span class="covsub">${esc(c.config_type||'no type')}</span>`;
+  const match = c.match==='generic' ? ' <span class="badge gen" title="This config lists no products: a generic fallback">generic</span>'
+    : c.match==='signature' ? ' <span class="badge sig" title="This config was written for other products and only fits this device by its DP signature">signature</span>' : '';
+  const head = c.missing.length
+    ? `<span class="badge gap">${c.missing.length} of ${n} unmapped</span>`
+    : `<span class="badge ok">all ${n} mapped</span>`;
+  return head+match+`<span class="covsub">${esc(c.config_type)}</span>`;
 }
 
 function dpRange(v){
@@ -307,9 +328,11 @@ function dpDetail(r){
   let html='';
   if(dp.error) html+=`<div class="dperr">⚠ ${esc(dp.error)}</div>`;
   const ids=Object.keys(dp.dps||{}).sort((a,b)=>Number(a)-Number(b));
+  const cov=r.cov, inHA=cov&&(cov.status==='complete'||cov.status==='gaps');
   if(ids.length){
     html+=`<div class="dpscroll"><table class="dptable"><thead><tr>`
       +`<th>DP</th><th>Code</th><th>Type</th><th>Value</th><th>Range / enum</th><th></th>`
+      +(inHA?`<th>In Home Assistant</th>`:'')
       +`</tr></thead><tbody>`;
     ids.forEach(id=>{
       const d=dp.dps[id], has=Object.prototype.hasOwnProperty.call(dp.values||{},id);
@@ -318,9 +341,35 @@ function dpDetail(r){
         +`<td>${esc(d.type||'')}</td>`
         +`<td class="dpval">${has?esc(typeof val==='object'?JSON.stringify(val):String(val)):'—'}</td>`
         +`<td>${esc(dpRange(d.values))}</td>`
-        +`<td>${d.writable?'<span class="dpw">write</span>':''}</td></tr>`;
+        +`<td>${d.writable?'<span class="dpw">write</span>':''}</td>`
+        +(inHA?(cov.configured[id]
+          ?`<td class="dpha">${esc(cov.configured[id])}</td>`
+          :`<td class="dpmiss">⚠ not mapped — HA can't see this</td>`):'')
+        +`</tr>`;
     });
     html+=`</tbody></table></div>`;
+  }
+  if(cov){
+    if(cov.status==='not_in_ha')
+      html+=`<div class="dpnote">Not set up in Tuya Local, so nothing here reaches Home Assistant.</div>`;
+    else if(cov.status==='config_unreadable')
+      html+=`<div class="dperr">⚠ Tuya Local entry “${esc(cov.entry_title)}” points at `
+        +`<code>${esc(cov.config_type||'(no type)')}</code>, which can't be read: ${esc(cov.error)}</div>`;
+    else{
+      const why = cov.match==='product' ? 'written for this product'
+        : cov.match==='signature' ? 'written for other products — it matches only by DP signature'
+        : 'a generic config with no product list';
+      html+=`<div class="dpnote">Tuya Local config <code>${esc(cov.config_type)}</code>`
+        +(cov.config_name?` (“${esc(cov.config_name)}”)`:'')+` — ${why}. `
+        +(cov.missing.length
+          ? `<b class="covwarn">${cov.missing.length} DP${cov.missing.length===1?'':'s'} unmapped: `
+            +cov.missing.map(esc).join(', ')+`.</b>`
+          : `Every DP the device reports is mapped.`)+`</div>`;
+      if(cov.extra.length)
+        html+=`<div class="dpnote">The config also expects DP${cov.extra.length===1?'':'s'} `
+          +cov.extra.map(esc).join(', ')+` that the device didn't report — usually an optional DP, `
+          +`sometimes a sign the config is for a different model.</div>`;
+    }
   }
   const um=Object.keys(dp.unmapped||{});
   if(um.length) html+=`<div class="dpnote">Reported but absent from the spec: `
@@ -371,9 +420,17 @@ function renderStats(){
     const errs=rows.filter(r=>r.dp && r.dp.error).length;
     const unread=rows.filter(r=>!r.dp).length;
     const unmapped=rows.filter(r=>r.dp && Object.keys(r.dp.unmapped||{}).length).length;
+    const gaps=rows.filter(r=>r.cov&&r.cov.status==='gaps').length;
+    const generic=rows.filter(r=>r.cov&&r.cov.match==='generic').length;
+    const notinha=rows.filter(r=>r.cov&&r.cov.status==='not_in_ha').length;
+    const cfgbad=rows.filter(r=>r.cov&&r.cov.status==='config_unreadable').length;
     s.innerHTML=`
       <div class="stat ${catFilter==='all'?'active':''}" data-f="all"><span class="n">${rows.length}</span><span class="l">Devices</span></div>
       <div class="stat on ${catFilter==='withdps'?'active':''}" data-f="withdps"><span class="n">${withDps}</span><span class="l">With DPs</span></div>
+      <div class="stat mm ${catFilter==='hagaps'?'active':''}" data-f="hagaps"><span class="n">${gaps}</span><span class="l">Unmapped in HA</span></div>
+      <div class="stat ${catFilter==='generic'?'active':''}" data-f="generic"><span class="n">${generic}</span><span class="l">Generic config</span></div>
+      <div class="stat ${catFilter==='notinha'?'active':''}" data-f="notinha"><span class="n">${notinha}</span><span class="l">Not in HA</span></div>
+      ${cfgbad?`<div class="stat mm ${catFilter==='cfgbad'?'active':''}" data-f="cfgbad"><span class="n">${cfgbad}</span><span class="l">Config missing</span></div>`:''}
       <div class="stat ${catFilter==='unread'?'active':''}" data-f="unread"><span class="n">${unread}</span><span class="l">Not read</span></div>
       <div class="stat mm ${catFilter==='dpserr'?'active':''}" data-f="dpserr"><span class="n">${errs}</span><span class="l">Failed</span></div>
       <div class="stat ${catFilter==='unmapped'?'active':''}" data-f="unmapped"><span class="n">${unmapped}</span><span class="l">Unmapped</span></div>`;
@@ -399,7 +456,8 @@ function renderHead(){
       <div class="th" data-s="action" style="justify-content:flex-end">Action</div>`;
   }else if(view==='dps'){ h.className='thead grid-dps';
     h.innerHTML=`<div class="th" data-s="name">Device</div><div class="th" data-s="product">Product ID</div>
-      <div class="th" data-s="count">DPs</div><div class="th" data-s="read">Read</div>`;
+      <div class="th" data-s="count">DPs</div><div class="th" data-s="cov">In HA</div>
+      <div class="th" data-s="read">Read</div>`;
   }else{ h.className='thead grid-dev';
     h.innerHTML=`<div class="th" data-s="name">Device</div><div class="th" data-s="ip">IP</div>
       <div class="th" data-s="key">Local key</div><div class="th" data-s="ver" style="justify-content:flex-end">Ver</div>`;
@@ -480,11 +538,18 @@ function render(){
     else if(catFilter==='unread')list=list.filter(r=>!r.dp);
     else if(catFilter==='dpserr')list=list.filter(r=>r.dp&&r.dp.error);
     else if(catFilter==='unmapped')list=list.filter(r=>r.dp&&Object.keys(r.dp.unmapped||{}).length);
+    else if(catFilter==='hagaps')list=list.filter(r=>r.cov&&r.cov.status==='gaps');
+    else if(catFilter==='generic')list=list.filter(r=>r.cov&&r.cov.match==='generic');
+    else if(catFilter==='notinha')list=list.filter(r=>r.cov&&r.cov.status==='not_in_ha');
+    else if(catFilter==='cfgbad')list=list.filter(r=>r.cov&&r.cov.status==='config_unreadable');
     if(q)list=list.filter(r=>r.name.toLowerCase().includes(q)||(r.id||'').includes(q)
+      ||(r.cov&&(r.cov.config_type||'').toLowerCase().includes(q))
       ||(r.dp?Object.values(r.dp.dps||{}).some(d=>(d.code||'').toLowerCase().includes(q)):false));
     if(sortKey)list.sort((a,b)=>{
       if(sortKey==='count')return ((a.dp?Object.keys(a.dp.dps||{}).length:-1)-(b.dp?Object.keys(b.dp.dps||{}).length:-1))*sortDir;
       if(sortKey==='read')return (((a.dp&&a.dp.fetched)||0)-((b.dp&&b.dp.fetched)||0))*sortDir;
+      if(sortKey==='cov'){ const g=r=>!r.cov?-2:r.cov.status==='not_in_ha'?-1:(r.cov.missing||[]).length;
+        return (g(b)-g(a))*sortDir; }
       const av=(sortKey==='product'?(a.product_id||''):a.name).toLowerCase();
       const bv=(sortKey==='product'?(b.product_id||''):b.name).toLowerCase();
       return av<bv?-sortDir:av>bv?sortDir:0; });
@@ -499,6 +564,7 @@ function render(){
           <span class="id">${esc(r.id||'')}</span></div></div>
         <div class="copyable" data-copy="${esc(r.product_id||'')}"><span class="txt">${esc(r.product_id||'—')}</span></div>
         <div>${badge}</div>
+        <div class="covcell">${covCell(r)}</div>
         <div class="ver">${dp&&dp.fetched?esc(fmtTime(dp.fetched)):'—'}</div>`;
       row.querySelectorAll('.copyable[data-copy]').forEach(nd=>nd.onclick=ev=>{
         ev.stopPropagation(); copy(nd.dataset.copy,nd); });
