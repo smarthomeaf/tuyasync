@@ -61,7 +61,21 @@
   .row:last-child{border-bottom:none} .row:hover{background:var(--panel-2)}
   .grid-dev{grid-template-columns:1.5fr 1fr 1.9fr .5fr}
   .grid-mm{grid-template-columns:1.3fr .85fr .85fr 1.5fr .55fr .8fr}
-  .grid-dps{grid-template-columns:1.7fr 1.1fr .55fr .9fr}
+  .grid-dps{grid-template-columns:1.5fr 1fr .5fr 1.25fr .7fr}
+  /* configured vs discovered */
+  .covcell{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+  .covsub{display:block;width:100%;font-family:var(--mono);font-size:10px;color:var(--ink-faint);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .badge.ok{background:#5fd88a22;color:var(--green)}
+  .badge.gap{background:var(--amber-soft);color:var(--amber)}
+  .badge.none{background:#56698a22;color:var(--ink-dim)}
+  .badge.cfgbad{background:var(--red-soft);color:var(--red)}
+  .badge.gen{background:#9b8cff22;color:#b3a6ff}
+  .badge.sig{background:var(--cyan-soft);color:var(--cyan)}
+  .dptable td.dpha{color:var(--cyan);font-size:11.5px}
+  .dptable td.dpmiss{color:var(--amber);font-size:11.5px;font-weight:600}
+  .dpnote code,.dperr code{font-family:var(--mono);color:var(--cyan)}
+  .covwarn{color:var(--amber)}
 
   /* data points: one row per device, its DP table folded underneath */
   .expander{cursor:pointer;user-select:none;color:var(--ink-faint);font-size:9px;

@@ -47,6 +47,31 @@ types and ranges; the local protocol returns bare numbers.
 A device that is offline in the Tuya cloud shows its spec with a note that the
 values are unavailable. Cloud credentials are required (Configuration tab).
 
+### What Home Assistant is missing
+
+The **In HA** column compares what each device reports against what its Tuya
+Local config actually maps. Tuya Local records the config it matched in the
+entry (`data["type"]`) and loads `custom_components/tuya_local/devices/<type>.yaml`;
+TuyaSync reads that same file and lists every DP its entities use.
+
+- **all N mapped** — every DP the device reports becomes something in HA.
+- **M of N unmapped** — the device can do things HA can't see or control.
+  Expand the device: each DP shows what it becomes in HA, and the unmapped
+  ones are flagged. Those are the candidates for a better config.
+- **generic** — the config lists no products at all; it's a fallback
+  (Simple switch, Multi switch…) matched only because the DPs fit.
+- **signature** — the config was written for other products and fits this
+  device by its DP signature alone.
+- **not in HA** — the device isn't set up in Tuya Local.
+- **config missing** — the entry points at a config file that isn't there,
+  typically one deleted by a Tuya Local update.
+
+The detail also lists DPs the config *expects* but the device didn't report —
+usually optional DPs, occasionally a sign the config belongs to another model.
+
+The filter chips **Unmapped in HA**, **Generic config** and **Not in HA**
+narrow the list to each group.
+
 ## Creating a Tuya Local config for an unrecognised device
 
 Tuya Local matches a device by its **DP signature** — which DP numbers it has
